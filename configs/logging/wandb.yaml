@@ -1,0 +1,9 @@
+name: wandb
+enabled: true
+offline: true
+project: docr
+entity: tryanother
+run_name: ${model.name}-${train.name}
+dir: ${output_dir}/wandb
+tags:
+  - research-v1

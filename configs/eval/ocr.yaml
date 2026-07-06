@@ -1,0 +1,9 @@
+name: ocr
+batch_size: 1
+metrics:
+  - cer
+  - wer
+  - numeric_exact_match
+report_path: outputs/eval/report.md
+json_path: outputs/eval/metrics.json
+

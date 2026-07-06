@@ -1,0 +1,44 @@
+name: diffusion_ocr
+image_size: [1024, 768]
+visual_tokens: 768
+vision:
+  backbone: patch
+  backbone_name: facebook/sam-vit-base
+  freeze_backbone: true
+  local_files_only: false
+  trust_remote_code: false
+  patch_size: 16
+  hidden_size: 512
+  num_layers: 4
+  positional_embedding: learned_2d
+  max_grid_size: 256
+compressor:
+  type: perceiver
+  num_queries: ${model.visual_tokens}
+  num_layers: 2
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+decoder:
+  implementation: diffusion_transformer
+  backbone_name: null
+  hidden_size: 512
+  vocab_size: 256
+  num_layers: 4
+  num_heads: 8
+  mlp_ratio: 4.0
+  max_length: ${model.canvas.length}
+  dropout: 0.0
+  mode: diffusion
+canvas:
+  length: 128
+  num_canvases: 1
+diffusion:
+  timesteps: 32
+  mask_token_id: 255
+  min_mask_ratio: 0.05
+  max_mask_ratio: 0.95
+loss_weights:
+  ar: 0.2
+  diffusion: 1.0
+  refinement: 0.0

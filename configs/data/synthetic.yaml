@@ -1,0 +1,8 @@
+name: synthetic
+num_train: 16
+num_val: 4
+image_size: ${model.image_size}
+max_text_length: 128
+canvas_length: ${model.canvas.length}
+num_workers: 0
+

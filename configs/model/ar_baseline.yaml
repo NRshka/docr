@@ -1,0 +1,39 @@
+name: ar_baseline
+image_size: [1024, 768]
+visual_tokens: 768
+vision:
+  backbone: patch
+  backbone_name: facebook/sam-vit-base
+  freeze_backbone: true
+  local_files_only: false
+  trust_remote_code: false
+  patch_size: 16
+  hidden_size: 512
+  num_layers: 4
+  positional_embedding: learned_2d
+  max_grid_size: 256
+compressor:
+  type: perceiver
+  num_queries: ${model.visual_tokens}
+  num_layers: 2
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+decoder:
+  implementation: qwen_visual_prefix
+  backbone_name: Qwen/Qwen2.5-0.5B
+  tokenizer_name: Qwen/Qwen2.5-0.5B
+  hidden_size: 512
+  vocab_size: 256
+  mode: ar
+  freeze_lm: false
+  local_files_only: false
+  trust_remote_code: false
+canvas:
+  length: 128
+diffusion:
+  timesteps: 32
+loss_weights:
+  ar: 1.0
+  diffusion: 0.0
+  refinement: 0.0

@@ -1,0 +1,9 @@
+torch
+transformers
+datasets
+hydra-core
+omegaconf
+wandb
+pillow
+numpy
+pytest

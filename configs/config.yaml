@@ -1,0 +1,17 @@
+defaults:
+  - model: ar_baseline
+  - data: manifest
+  - train: ar
+  - eval: ocr
+  - logging: wandb
+  - _self_
+
+seed: 1337
+device: auto
+output_dir: outputs
+checkpoint_path: null
+image_path: null
+manifest_path: null
+mode: ${model.decoder.mode}
+prediction: ""
+target: ""
