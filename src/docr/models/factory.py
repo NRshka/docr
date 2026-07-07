@@ -4,6 +4,7 @@ from typing import Any
 
 from docr.models.decoder import DiffusionTransformerDecoder, OCRModel, QwenVisualPrefixDecoder
 from docr.models.decoder import TinyTextDecoder
+from docr.models.qwen_unified import UnifiedQwenDecoder
 from docr.models.vision_encoder import SamVisionEncoder, TinyVisionEncoder
 
 
@@ -53,6 +54,36 @@ def build_model(cfg: Any) -> OCRModel:
             freeze_lm=bool(cfg.model.decoder.get("freeze_lm", False)),
             local_files_only=bool(cfg.model.decoder.get("local_files_only", False)),
             trust_remote_code=bool(cfg.model.decoder.get("trust_remote_code", False)),
+        )
+    elif implementation == "qwen_unified":
+        qwen_config = None
+        if bool(cfg.model.decoder.get("random_init", False)):
+            from transformers import Qwen2Config
+
+            qwen_config = Qwen2Config(
+                vocab_size=int(cfg.model.decoder.get("vocab_size", 256)),
+                hidden_size=int(cfg.model.decoder.hidden_size),
+                intermediate_size=int(cfg.model.decoder.get("intermediate_size", 2048)),
+                num_hidden_layers=int(cfg.model.decoder.get("num_hidden_layers", 4)),
+                num_attention_heads=int(cfg.model.decoder.get("num_attention_heads", 8)),
+                num_key_value_heads=int(cfg.model.decoder.get("num_key_value_heads", 4)),
+                max_position_embeddings=int(
+                    cfg.model.decoder.get("max_position_embeddings", cfg.model.canvas.length + cfg.model.visual_tokens)
+                ),
+                pad_token_id=0,
+                bos_token_id=1,
+                eos_token_id=2,
+            )
+        decoder = UnifiedQwenDecoder(
+            backbone_name=str(cfg.model.decoder.backbone_name),
+            visual_hidden_size=int(cfg.model.vision.hidden_size),
+            timesteps=int(cfg.model.diffusion.get("timesteps", 32)),
+            num_canvases=int(cfg.model.canvas.get("num_canvases", 1)),
+            canvas_length=int(cfg.model.canvas.length),
+            freeze_lm=bool(cfg.model.decoder.get("freeze_lm", False)),
+            local_files_only=bool(cfg.model.decoder.get("local_files_only", False)),
+            trust_remote_code=bool(cfg.model.decoder.get("trust_remote_code", False)),
+            config=qwen_config,
         )
     elif implementation == "diffusion_transformer":
         decoder = DiffusionTransformerDecoder(

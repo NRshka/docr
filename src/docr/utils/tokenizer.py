@@ -7,6 +7,8 @@ def build_tokenizer(cfg: Any):
     implementation = str(cfg.model.decoder.get("implementation", "tiny"))
     if implementation in {"tiny", "diffusion_transformer"}:
         return None
+    if bool(cfg.model.decoder.get("random_init", False)) and cfg.model.decoder.get("tokenizer_name", None) is None:
+        return None
 
     from transformers import AutoTokenizer
 
