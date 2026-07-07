@@ -13,6 +13,11 @@ gradient_accumulation_steps: 4
 max_steps: 1000
 checkpoint_interval: 250
 log_interval: 10
+validate: true
+val_batch_size: ${train.batch_size}
+val_check_interval: 250
+check_val_every_n_epoch: 1
+num_sanity_val_steps: 0
 probe_interval: 50
 probe_timesteps: [1, 4, 8, 16, 24, 31]
 probe_visual_ablations:

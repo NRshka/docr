@@ -68,6 +68,56 @@ def build_lightning_logger(cfg: DictConfig):
     )
 
 
+def build_dataset(cfg: DictConfig, tokenizer, split: str):
+    image_size = tuple(cfg.model.image_size)
+    if cfg.data.name == "synthetic":
+        num_samples = cfg.data.get("num_train", 4) if split == "train" else cfg.data.get("num_val", 0)
+        if int(num_samples) <= 0:
+            return None
+        return SyntheticOCRDataset(num_samples=num_samples, image_size=image_size)
+    if cfg.data.name == "manifest":
+        manifest_key = "train_manifest" if split == "train" else "val_manifest"
+        manifest_path = Path(str(cfg.data.get(manifest_key, "")))
+        if split != "train" and not manifest_path.exists():
+            print(f"validation=disabled missing_manifest={manifest_path}")
+            return None
+        return ManifestOCRDataset(
+            manifest_path=manifest_path,
+            image_root=cfg.data.image_root,
+            image_size=image_size,
+            tokenizer=tokenizer,
+            max_text_length=cfg.data.max_text_length,
+        )
+    if cfg.data.name == "cord_v2":
+        hf_split = cfg.data.split if split == "train" else cfg.data.get("val_split", "validation")
+        max_samples = cfg.data.max_samples if split == "train" else cfg.data.get("val_max_samples", cfg.data.max_samples)
+        return HFCordV2OCRDataset(
+            dataset_name=cfg.data.dataset_name,
+            dataset_path=cfg.data.get("dataset_path", None),
+            split=hf_split,
+            image_size=tuple(cfg.data.image_size),
+            target_mode=cfg.data.target_mode,
+            load_from_disk=bool(cfg.data.get("load_from_disk", False)),
+            streaming=bool(cfg.data.streaming),
+            max_samples=max_samples,
+            tokenizer=tokenizer,
+            max_text_length=cfg.data.max_text_length,
+        )
+    raise ValueError(f"Unknown dataset: {cfg.data.name}")
+
+
+def build_loader(cfg: DictConfig, dataset, collator: OCRCollator, split: str):
+    if dataset is None:
+        return None
+    batch_size = int(cfg.train.batch_size if split == "train" else cfg.train.get("val_batch_size", cfg.train.batch_size))
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collator,
+        num_workers=int(cfg.data.get("num_workers", 0)),
+    )
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     seed_everything(int(cfg.seed))
@@ -77,44 +127,15 @@ def main(cfg: DictConfig) -> None:
     tokenizer = build_tokenizer(cfg)
     pad_token_id = tokenizer_pad_id(tokenizer)
 
-    image_size = tuple(cfg.model.image_size)
-    if cfg.data.name == "synthetic":
-        dataset = SyntheticOCRDataset(num_samples=cfg.data.get("num_train", 4), image_size=image_size)
-    elif cfg.data.name == "manifest":
-        dataset = ManifestOCRDataset(
-            manifest_path=cfg.data.train_manifest,
-            image_root=cfg.data.image_root,
-            image_size=image_size,
-            tokenizer=tokenizer,
-            max_text_length=cfg.data.max_text_length,
-        )
-    elif cfg.data.name == "cord_v2":
-        dataset = HFCordV2OCRDataset(
-            dataset_name=cfg.data.dataset_name,
-            dataset_path=cfg.data.get("dataset_path", None),
-            split=cfg.data.split,
-            image_size=tuple(cfg.data.image_size),
-            target_mode=cfg.data.target_mode,
-            load_from_disk=bool(cfg.data.get("load_from_disk", False)),
-            streaming=bool(cfg.data.streaming),
-            max_samples=cfg.data.max_samples,
-            tokenizer=tokenizer,
-            max_text_length=cfg.data.max_text_length,
-        )
-    else:
-        raise ValueError(f"Unknown dataset: {cfg.data.name}")
-
     collator = OCRCollator(
         pad_token_id=pad_token_id,
         canvas_length=int(cfg.model.canvas.length),
         mask_token_id=pad_token_id,
     )
-    loader = DataLoader(
-        dataset,
-        batch_size=int(cfg.train.batch_size),
-        collate_fn=collator,
-        num_workers=int(cfg.data.get("num_workers", 0)),
-    )
+    dataset = build_dataset(cfg, tokenizer, split="train")
+    val_dataset = build_dataset(cfg, tokenizer, split="val") if bool(cfg.train.get("validate", True)) else None
+    loader = build_loader(cfg, dataset, collator, split="train")
+    val_loader = build_loader(cfg, val_dataset, collator, split="val")
 
     model = build_model(cfg)
     if tokenizer is not None and hasattr(model.decoder, "lm"):
@@ -181,12 +202,15 @@ def main(cfg: DictConfig) -> None:
         max_steps=int(cfg.train.max_steps),
         accumulate_grad_batches=int(cfg.train.gradient_accumulation_steps),
         log_every_n_steps=int(cfg.train.log_interval),
+        val_check_interval=cfg.train.get("val_check_interval", None),
+        check_val_every_n_epoch=cfg.train.get("check_val_every_n_epoch", 1),
+        num_sanity_val_steps=int(cfg.train.get("num_sanity_val_steps", 0)),
         logger=build_lightning_logger(cfg),
         callbacks=callbacks,
         enable_checkpointing=bool(callbacks),
         default_root_dir=str(cfg.output_dir),
     )
-    trainer.fit(lightning_module, train_dataloaders=loader)
+    trainer.fit(lightning_module, train_dataloaders=loader, val_dataloaders=val_loader)
     print(f"completed_steps={trainer.global_step}")
 
 

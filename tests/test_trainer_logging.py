@@ -32,3 +32,24 @@ def test_lightning_module_computes_ar_loss_metrics():
     assert "train/text_tokens" in metrics
     assert "train/tokens_per_sample" in metrics
     assert float(metrics["train/text_tokens"]) == 3.0
+
+
+def test_lightning_module_logs_validation_metrics():
+    module = OCRLightningModule(
+        model=TinyTrainModel(),
+        learning_rate=1e-3,
+        log_to_logger=False,
+    )
+    batch = {
+        "images": torch.randn(2, 3, 4, 4),
+        "input_ids": torch.tensor([[1, 2, 0], [3, 0, 0]]),
+        "attention_mask": torch.tensor([[True, True, False], [True, False, False]]),
+    }
+
+    loss = module.validation_step(batch, batch_idx=0)
+
+    assert loss.requires_grad
+    assert "val/loss" in module.last_val_metrics
+    assert "val/loss_ar" in module.last_val_metrics
+    assert "val/text_tokens" in module.last_val_metrics
+    assert module.last_val_metrics["val/text_tokens"] == 3.0

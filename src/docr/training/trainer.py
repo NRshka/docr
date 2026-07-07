@@ -42,6 +42,7 @@ class OCRLightningModule(L.LightningModule):
         self.diffusion_loss_weight = diffusion_loss_weight
         self.log_to_logger = log_to_logger
         self.last_metrics: dict[str, float] = {}
+        self.last_val_metrics: dict[str, float] = {}
         self.save_hyperparameters(ignore=["model", "diffusion_schedule", "special_token_ids"])
 
     def configure_optimizers(self) -> AdamW:
@@ -59,6 +60,26 @@ class OCRLightningModule(L.LightningModule):
         else:
             loss, metrics = self._ar_step(images, input_ids, attention_mask)
         self._log_train_metrics(metrics, batch_size=images.shape[0])
+        return loss
+
+    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
+        del batch_idx
+        images = batch["images"]
+        input_ids = batch["input_ids"]
+        attention_mask = batch.get("attention_mask", None)
+        if self.mode == "joint":
+            loss, metrics = self._joint_step(images, input_ids, attention_mask, include_probes=False)
+        elif self.mode == "diffusion":
+            loss, metrics = self._diffusion_step(
+                images,
+                input_ids,
+                attention_mask,
+                include_probes=False,
+            )
+        else:
+            loss, metrics = self._ar_step(images, input_ids, attention_mask)
+        val_metrics = self._with_metric_prefix(metrics, "val")
+        self._log_val_metrics(val_metrics, batch_size=images.shape[0])
         return loss
 
     def _ar_step(
@@ -176,6 +197,7 @@ class OCRLightningModule(L.LightningModule):
         images: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None,
+        include_probes: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         visual_tokens = self.model.encode_images(images)
         ar_loss, ar_metrics = self._ar_step(
@@ -210,7 +232,7 @@ class OCRLightningModule(L.LightningModule):
                 "train/text_tokens_ar": ar_metrics["train/text_tokens"].detach(),
             }
         )
-        if self._should_probe():
+        if include_probes and self._should_probe():
             metrics.update(self._diffusion_probe_metrics(images, input_ids, attention_mask, visual_tokens))
         return loss, metrics
 
@@ -248,6 +270,31 @@ class OCRLightningModule(L.LightningModule):
             sync_dist=True,
             batch_size=batch_size,
         )
+
+    def _log_val_metrics(self, metrics: dict[str, torch.Tensor], batch_size: int) -> None:
+        self.last_val_metrics = {
+            name: float(value.detach().cpu()) if isinstance(value, torch.Tensor) else float(value)
+            for name, value in metrics.items()
+        }
+        self.log_dict(
+            metrics,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=self.log_to_logger,
+            sync_dist=True,
+            batch_size=batch_size,
+        )
+
+    def _with_metric_prefix(
+        self,
+        metrics: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            name.replace("train/", f"{prefix}/", 1) if name.startswith("train/") else f"{prefix}/{name}": value
+            for name, value in metrics.items()
+        }
 
     def _should_probe(self) -> bool:
         step = int(self.global_step) + 1
