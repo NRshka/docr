@@ -38,6 +38,7 @@ def lightning_precision(precision: str) -> str:
 def build_lightning_logger(cfg: DictConfig):
     logging_cfg = cfg.logging
     if not bool(logging_cfg.enabled):
+        print("wandb_logging=disabled")
         return False
 
     save_dir = Path(str(logging_cfg.get("dir", f"{cfg.output_dir}/wandb")))
@@ -48,12 +49,19 @@ def build_lightning_logger(cfg: DictConfig):
     Path(os.environ["WANDB_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
     Path(os.environ["WANDB_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
 
+    mode = "offline" if bool(logging_cfg.offline) else "online"
+    print(
+        "wandb_logging="
+        f"{mode} entity={logging_cfg.entity} project={logging_cfg.project} "
+        f"name={logging_cfg.run_name}"
+    )
     return WandbLogger(
         project=str(logging_cfg.project),
         entity=str(logging_cfg.entity) if logging_cfg.entity is not None else None,
         name=str(logging_cfg.run_name) if logging_cfg.run_name is not None else None,
         tags=list(logging_cfg.get("tags", [])),
         save_dir=str(save_dir),
+        dir=str(save_dir),
         offline=bool(logging_cfg.offline),
         config=OmegaConf.to_container(cfg, resolve=True),
     )
@@ -128,6 +136,7 @@ def main(cfg: DictConfig) -> None:
         probe_interval=int(cfg.train.get("probe_interval", 0)),
         probe_timesteps=list(cfg.train.get("probe_timesteps", [])),
         probe_visual_ablations=list(cfg.train.get("probe_visual_ablations", [])),
+        log_to_logger=bool(cfg.logging.enabled),
     )
 
     callbacks = []

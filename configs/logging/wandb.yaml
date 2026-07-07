@@ -1,6 +1,6 @@
 name: wandb
 enabled: true
-offline: true
+offline: false
 project: docr
 entity: tryanother
 run_name: ${model.name}-${train.name}

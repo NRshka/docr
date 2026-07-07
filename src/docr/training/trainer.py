@@ -23,6 +23,7 @@ class OCRLightningModule(L.LightningModule):
         probe_interval: int = 0,
         probe_timesteps: list[int] | None = None,
         probe_visual_ablations: list[str] | None = None,
+        log_to_logger: bool = True,
     ) -> None:
         super().__init__()
         self.model = model
@@ -35,6 +36,7 @@ class OCRLightningModule(L.LightningModule):
         self.probe_interval = probe_interval
         self.probe_timesteps = probe_timesteps or []
         self.probe_visual_ablations = probe_visual_ablations or []
+        self.log_to_logger = log_to_logger
         self.last_metrics: dict[str, float] = {}
         self.save_hyperparameters(ignore=["model", "diffusion_schedule", "special_token_ids"])
 
@@ -173,7 +175,7 @@ class OCRLightningModule(L.LightningModule):
             on_step=True,
             on_epoch=False,
             prog_bar=False,
-            logger=self.logger is not None,
+            logger=self.log_to_logger,
             sync_dist=True,
             batch_size=batch_size,
         )
