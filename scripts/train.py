@@ -9,6 +9,7 @@ os.environ.setdefault("WANDB_ERROR_REPORTING", "false")
 
 import hydra
 import lightning as L
+import torch
 from omegaconf import DictConfig
 from omegaconf import OmegaConf
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -71,6 +72,8 @@ def build_lightning_logger(cfg: DictConfig):
 def main(cfg: DictConfig) -> None:
     seed_everything(int(cfg.seed))
     L.seed_everything(int(cfg.seed), workers=True)
+    if bool(cfg.train.get("suppress_accumulate_grad_stream_warning", False)):
+        torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
     tokenizer = build_tokenizer(cfg)
     pad_token_id = tokenizer_pad_id(tokenizer)
 
@@ -114,16 +117,32 @@ def main(cfg: DictConfig) -> None:
     )
 
     model = build_model(cfg)
+    if tokenizer is not None and hasattr(model.decoder, "lm"):
+        input_embeddings = model.decoder.lm.get_input_embeddings()
+        if input_embeddings.num_embeddings != len(tokenizer):
+            model.decoder.lm.resize_token_embeddings(len(tokenizer))
+
     diffusion_schedule = None
     mask_token_id = None
     special_token_ids = {pad_token_id}
-    if cfg.train.name == "diffusion" or cfg.model.decoder.mode == "diffusion":
+    uses_diffusion = (
+        cfg.train.name in {"diffusion", "joint", "draft_refine"}
+        or cfg.model.decoder.mode in {"diffusion", "joint"}
+        or float(cfg.model.loss_weights.get("diffusion", 0.0)) > 0.0
+    )
+    if uses_diffusion:
         diffusion_schedule = DiscreteDiffusionSchedule(
             timesteps=int(cfg.model.diffusion.timesteps),
             min_mask_ratio=float(cfg.model.diffusion.get("min_mask_ratio", 0.0)),
             max_mask_ratio=float(cfg.model.diffusion.get("max_mask_ratio", 1.0)),
         )
-        mask_token_id = int(cfg.model.diffusion.mask_token_id)
+        configured_mask_token_id = cfg.model.diffusion.get("mask_token_id", None)
+        if configured_mask_token_id is None:
+            mask_token_id = getattr(tokenizer, "mask_token_id", None)
+            if mask_token_id is None:
+                mask_token_id = pad_token_id
+        else:
+            mask_token_id = int(configured_mask_token_id)
 
     lightning_module = OCRLightningModule(
         model=model,
@@ -136,6 +155,8 @@ def main(cfg: DictConfig) -> None:
         probe_interval=int(cfg.train.get("probe_interval", 0)),
         probe_timesteps=list(cfg.train.get("probe_timesteps", [])),
         probe_visual_ablations=list(cfg.train.get("probe_visual_ablations", [])),
+        ar_loss_weight=float(cfg.model.loss_weights.get("ar", 1.0)),
+        diffusion_loss_weight=float(cfg.model.loss_weights.get("diffusion", 1.0)),
         log_to_logger=bool(cfg.logging.enabled),
     )
 

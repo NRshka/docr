@@ -8,6 +8,7 @@ precision: fp32
 accelerator: auto
 devices: auto
 strategy: auto
+suppress_accumulate_grad_stream_warning: true
 gradient_accumulation_steps: 1
 max_steps: 1000
 checkpoint_interval: 250

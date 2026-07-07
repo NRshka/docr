@@ -1,0 +1,44 @@
+name: joint_qwen
+image_size: [1024, 1024]
+visual_tokens: 768
+vision:
+  backbone: sam
+  backbone_name: facebook/sam-vit-base
+  freeze_backbone: true
+  local_files_only: false
+  trust_remote_code: false
+  patch_size: 16
+  hidden_size: 512
+  num_layers: 4
+  positional_embedding: learned_2d
+  max_grid_size: 256
+compressor:
+  type: perceiver
+  num_queries: ${model.visual_tokens}
+  num_layers: 2
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+decoder:
+  implementation: qwen_visual_prefix
+  backbone_name: Qwen/Qwen2.5-0.5B
+  tokenizer_name: Qwen/Qwen2.5-0.5B
+  hidden_size: 512
+  vocab_size: 256
+  mode: joint
+  freeze_lm: false
+  local_files_only: false
+  trust_remote_code: false
+canvas:
+  length: 128
+  num_canvases: 1
+diffusion:
+  timesteps: 32
+  mask_token: <|docr_mask|>
+  mask_token_id: null
+  min_mask_ratio: 0.05
+  max_mask_ratio: 0.95
+loss_weights:
+  ar: 1.0
+  diffusion: 1.0
+  refinement: 0.0

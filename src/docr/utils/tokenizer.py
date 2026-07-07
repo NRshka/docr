@@ -18,6 +18,9 @@ def build_tokenizer(cfg: Any):
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    mask_token = cfg.model.get("diffusion", {}).get("mask_token", None)
+    if mask_token is not None:
+        tokenizer.add_special_tokens({"mask_token": str(mask_token)})
     return tokenizer
 
 

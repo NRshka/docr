@@ -49,6 +49,7 @@ def build_model(cfg: Any) -> OCRModel:
         decoder = QwenVisualPrefixDecoder(
             backbone_name=str(cfg.model.decoder.backbone_name),
             visual_hidden_size=int(cfg.model.vision.hidden_size),
+            timesteps=int(cfg.model.diffusion.get("timesteps", 32)),
             freeze_lm=bool(cfg.model.decoder.get("freeze_lm", False)),
             local_files_only=bool(cfg.model.decoder.get("local_files_only", False)),
             trust_remote_code=bool(cfg.model.decoder.get("trust_remote_code", False)),

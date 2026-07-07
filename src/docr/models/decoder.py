@@ -112,6 +112,7 @@ class QwenVisualPrefixDecoder(nn.Module):
         self,
         backbone_name: str = "Qwen/Qwen2.5-0.5B",
         visual_hidden_size: int = 512,
+        timesteps: int = 32,
         freeze_lm: bool = False,
         local_files_only: bool = False,
         trust_remote_code: bool = False,
@@ -126,6 +127,7 @@ class QwenVisualPrefixDecoder(nn.Module):
         )
         hidden_size = int(self.lm.config.hidden_size)
         self.visual_proj = nn.Linear(visual_hidden_size, hidden_size)
+        self.timestep_embed = nn.Embedding(timesteps, hidden_size)
 
         if freeze_lm:
             for parameter in self.lm.parameters():
@@ -139,13 +141,20 @@ class QwenVisualPrefixDecoder(nn.Module):
         timestep: torch.Tensor | None = None,
         mode: str = "ar",
     ) -> DecoderOutput:
-        del timestep
-        if mode != "ar":
-            raise ValueError("QwenVisualPrefixDecoder currently supports only AR mode")
+        if mode not in {"ar", "diffusion"}:
+            raise ValueError(f"Unsupported decoder mode: {mode}")
         if visual_tokens is None:
             raise ValueError("QwenVisualPrefixDecoder requires visual_tokens")
 
         text_embeds = self.lm.get_input_embeddings()(input_ids)
+        if mode == "diffusion":
+            if timestep is None:
+                timestep = torch.zeros(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
+            if timestep.ndim == 0:
+                timestep = timestep.expand(input_ids.shape[0])
+            text_embeds = text_embeds + self.timestep_embed(timestep.long()).unsqueeze(1).to(
+                dtype=text_embeds.dtype
+            )
         visual_embeds = self.visual_proj(visual_tokens).to(dtype=text_embeds.dtype)
         inputs_embeds = torch.cat([visual_embeds, text_embeds], dim=1)
 
@@ -177,6 +186,25 @@ class OCRModel(nn.Module):
         self.vision_encoder = vision_encoder
         self.decoder = decoder
 
+    def encode_images(self, images: torch.Tensor) -> torch.Tensor:
+        return self.vision_encoder(images)
+
+    def decode_text(
+        self,
+        input_ids: torch.Tensor,
+        visual_tokens: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        timestep: torch.Tensor | None = None,
+        mode: str = "ar",
+    ) -> DecoderOutput:
+        return self.decoder(
+            input_ids=input_ids,
+            visual_tokens=visual_tokens,
+            attention_mask=attention_mask,
+            timestep=timestep,
+            mode=mode,
+        )
+
     def forward(
         self,
         images: torch.Tensor,
@@ -185,8 +213,8 @@ class OCRModel(nn.Module):
         timestep: torch.Tensor | None = None,
         mode: str = "ar",
     ) -> DecoderOutput:
-        visual_tokens = self.vision_encoder(images)
-        return self.decoder(
+        visual_tokens = self.encode_images(images)
+        return self.decode_text(
             input_ids=input_ids,
             visual_tokens=visual_tokens,
             attention_mask=attention_mask,

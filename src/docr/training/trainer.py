@@ -23,6 +23,8 @@ class OCRLightningModule(L.LightningModule):
         probe_interval: int = 0,
         probe_timesteps: list[int] | None = None,
         probe_visual_ablations: list[str] | None = None,
+        ar_loss_weight: float = 1.0,
+        diffusion_loss_weight: float = 1.0,
         log_to_logger: bool = True,
     ) -> None:
         super().__init__()
@@ -36,6 +38,8 @@ class OCRLightningModule(L.LightningModule):
         self.probe_interval = probe_interval
         self.probe_timesteps = probe_timesteps or []
         self.probe_visual_ablations = probe_visual_ablations or []
+        self.ar_loss_weight = ar_loss_weight
+        self.diffusion_loss_weight = diffusion_loss_weight
         self.log_to_logger = log_to_logger
         self.last_metrics: dict[str, float] = {}
         self.save_hyperparameters(ignore=["model", "diffusion_schedule", "special_token_ids"])
@@ -48,7 +52,9 @@ class OCRLightningModule(L.LightningModule):
         images = batch["images"]
         input_ids = batch["input_ids"]
         attention_mask = batch.get("attention_mask", None)
-        if self.mode == "diffusion":
+        if self.mode == "joint":
+            loss, metrics = self._joint_step(images, input_ids, attention_mask)
+        elif self.mode == "diffusion":
             loss, metrics = self._diffusion_step(images, input_ids, attention_mask)
         else:
             loss, metrics = self._ar_step(images, input_ids, attention_mask)
@@ -60,16 +66,25 @@ class OCRLightningModule(L.LightningModule):
         images: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None,
+        visual_tokens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         labels = input_ids.clone()
         if attention_mask is not None:
             labels = labels.masked_fill(~attention_mask.bool(), -100)
-        output = self.model(
-            images=images,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            mode="ar",
-        )
+        if visual_tokens is None:
+            output = self.model(
+                images=images,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                mode="ar",
+            )
+        else:
+            output = self.model.decode_text(
+                input_ids=input_ids,
+                visual_tokens=visual_tokens,
+                attention_mask=attention_mask,
+                mode="ar",
+            )
         loss = language_model_loss(output.logits, labels, ignore_index=-100)
         metrics = self._base_metrics(loss, images=images, labels=labels)
         metrics["train/loss_ar"] = loss.detach()
@@ -80,6 +95,8 @@ class OCRLightningModule(L.LightningModule):
         images: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None,
+        visual_tokens: torch.Tensor | None = None,
+        include_probes: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if self.diffusion_schedule is None or self.mask_token_id is None:
             raise ValueError("Diffusion training requires diffusion_schedule and mask_token_id")
@@ -112,13 +129,22 @@ class OCRLightningModule(L.LightningModule):
             dtype=torch.long,
             device=input_ids.device,
         )
-        output = self.model(
-            images=images,
-            input_ids=corrupted,
-            attention_mask=attention_mask,
-            timestep=timestep,
-            mode="diffusion",
-        )
+        if visual_tokens is None:
+            output = self.model(
+                images=images,
+                input_ids=corrupted,
+                attention_mask=attention_mask,
+                timestep=timestep,
+                mode="diffusion",
+            )
+        else:
+            output = self.model.decode_text(
+                input_ids=corrupted,
+                visual_tokens=visual_tokens,
+                attention_mask=attention_mask,
+                timestep=timestep,
+                mode="diffusion",
+            )
         loss = diffusion_denoising_loss(output.logits, input_ids, prediction_mask)
         labels = input_ids.masked_fill(~prediction_mask, -100)
         metrics = self._base_metrics(loss, images=images, labels=labels)
@@ -141,8 +167,51 @@ class OCRLightningModule(L.LightningModule):
                 "train/text_tokens": text_tokens.detach(),
             }
         )
+        if include_probes and self._should_probe():
+            metrics.update(self._diffusion_probe_metrics(images, input_ids, attention_mask, visual_tokens))
+        return loss, metrics
+
+    def _joint_step(
+        self,
+        images: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        visual_tokens = self.model.encode_images(images)
+        ar_loss, ar_metrics = self._ar_step(
+            images,
+            input_ids,
+            attention_mask,
+            visual_tokens=visual_tokens,
+        )
+        diffusion_loss, diffusion_metrics = self._diffusion_step(
+            images,
+            input_ids,
+            attention_mask,
+            visual_tokens=visual_tokens,
+            include_probes=False,
+        )
+        weighted_ar = self.ar_loss_weight * ar_loss
+        weighted_diffusion = self.diffusion_loss_weight * diffusion_loss
+        loss = weighted_ar + weighted_diffusion
+        metrics = {**diffusion_metrics}
+        metrics.update(
+            {
+                "train/loss": loss.detach(),
+                "train/loss_ar": ar_loss.detach(),
+                "train/loss_diffusion": diffusion_loss.detach(),
+                "train/loss_ar_weighted": weighted_ar.detach(),
+                "train/loss_diffusion_weighted": weighted_diffusion.detach(),
+                "train/ar_loss_weight": torch.tensor(self.ar_loss_weight, device=loss.device),
+                "train/diffusion_loss_weight": torch.tensor(
+                    self.diffusion_loss_weight,
+                    device=loss.device,
+                ),
+                "train/text_tokens_ar": ar_metrics["train/text_tokens"].detach(),
+            }
+        )
         if self._should_probe():
-            metrics.update(self._diffusion_probe_metrics(images, input_ids, attention_mask))
+            metrics.update(self._diffusion_probe_metrics(images, input_ids, attention_mask, visual_tokens))
         return loss, metrics
 
     def _base_metrics(
@@ -196,6 +265,7 @@ class OCRLightningModule(L.LightningModule):
         images: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None,
+        visual_tokens: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if self.diffusion_schedule is None or self.mask_token_id is None:
             return {}
@@ -220,14 +290,23 @@ class OCRLightningModule(L.LightningModule):
                 device=input_ids.device,
             )
             for ablation in self.probe_visual_ablations:
-                probe_images = self._ablate_images(images, ablation)
-                output = self.model(
-                    images=probe_images,
-                    input_ids=corrupted,
-                    attention_mask=attention_mask,
-                    timestep=timestep,
-                    mode="diffusion",
-                )
+                if ablation == "normal" and visual_tokens is not None:
+                    output = self.model.decode_text(
+                        input_ids=corrupted,
+                        visual_tokens=visual_tokens,
+                        attention_mask=attention_mask,
+                        timestep=timestep,
+                        mode="diffusion",
+                    )
+                else:
+                    probe_images = self._ablate_images(images, ablation)
+                    output = self.model(
+                        images=probe_images,
+                        input_ids=corrupted,
+                        attention_mask=attention_mask,
+                        timestep=timestep,
+                        mode="diffusion",
+                    )
                 loss = diffusion_denoising_loss(output.logits, input_ids, prediction_mask).detach()
                 key = f"probe/{ablation}_loss_t{timestep_value:02d}"
                 metrics[key] = loss
