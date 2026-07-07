@@ -5,8 +5,13 @@ weight_decay: 0.01
 optimizer: adamw
 scheduler: cosine
 precision: fp32
+accelerator: auto
+devices: auto
+strategy: auto
 gradient_accumulation_steps: 1
 max_steps: 1000
 checkpoint_interval: 250
 log_interval: 10
-
+probe_interval: 0
+probe_timesteps: []
+probe_visual_ablations: []

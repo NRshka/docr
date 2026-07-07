@@ -1,67 +1,67 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable
 from typing import Any
 
+import lightning as L
 import torch
 from torch.optim import AdamW
 
 from docr.models.diffusion import DiscreteDiffusionSchedule, corrupt_with_mask
-from docr.training.losses import diffusion_denoising_loss
-from docr.training.losses import language_model_loss
+from docr.training.losses import diffusion_denoising_loss, language_model_loss
 
 
-@dataclass
-class TrainState:
-    step: int = 0
-
-
-class OCRTrainer:
+class OCRLightningModule(L.LightningModule):
     def __init__(
         self,
         model: torch.nn.Module,
         learning_rate: float = 1e-4,
         weight_decay: float = 0.01,
-        device: str | torch.device = "cpu",
-        logger: Any | None = None,
-        log_interval: int = 10,
         mode: str = "ar",
         diffusion_schedule: DiscreteDiffusionSchedule | None = None,
         mask_token_id: int | None = None,
         special_token_ids: set[int] | None = None,
+        probe_interval: int = 0,
+        probe_timesteps: list[int] | None = None,
+        probe_visual_ablations: list[str] | None = None,
     ) -> None:
-        self.model = model.to(device)
-        self.device = torch.device(device)
-        self.optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        self.logger = logger
-        self.log_interval = log_interval
+        super().__init__()
+        self.model = model
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
         self.mode = mode
         self.diffusion_schedule = diffusion_schedule
         self.mask_token_id = mask_token_id
         self.special_token_ids = special_token_ids or set()
-        self.state = TrainState()
+        self.probe_interval = probe_interval
+        self.probe_timesteps = probe_timesteps or []
+        self.probe_visual_ablations = probe_visual_ablations or []
+        self.last_metrics: dict[str, float] = {}
+        self.save_hyperparameters(ignore=["model", "diffusion_schedule", "special_token_ids"])
 
-    def train_step(self, batch: dict) -> dict[str, float]:
-        self.model.train()
-        images = batch["images"].to(self.device)
-        input_ids = batch["input_ids"].to(self.device)
+    def configure_optimizers(self) -> AdamW:
+        return AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+
+    def training_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
+        del batch_idx
+        images = batch["images"]
+        input_ids = batch["input_ids"]
         attention_mask = batch.get("attention_mask", None)
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(self.device)
         if self.mode == "diffusion":
-            return self._diffusion_train_step(images, input_ids, attention_mask)
-        return self._ar_train_step(images, input_ids, attention_mask)
+            loss, metrics = self._diffusion_step(images, input_ids, attention_mask)
+        else:
+            loss, metrics = self._ar_step(images, input_ids, attention_mask)
+        self._log_train_metrics(metrics, batch_size=images.shape[0])
+        return loss
 
-    def _ar_train_step(
+    def _ar_step(
         self,
         images: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None,
-    ) -> dict[str, float]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         labels = input_ids.clone()
         if attention_mask is not None:
-            labels = labels.masked_fill(~attention_mask, -100)
+            labels = labels.masked_fill(~attention_mask.bool(), -100)
         output = self.model(
             images=images,
             input_ids=input_ids,
@@ -69,14 +69,16 @@ class OCRTrainer:
             mode="ar",
         )
         loss = language_model_loss(output.logits, labels, ignore_index=-100)
-        return self._finish_step(loss, images=images, labels=labels)
+        metrics = self._base_metrics(loss, images=images, labels=labels)
+        metrics["train/loss_ar"] = loss.detach()
+        return loss, metrics
 
-    def _diffusion_train_step(
+    def _diffusion_step(
         self,
         images: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None,
-    ) -> dict[str, float]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if self.diffusion_schedule is None or self.mask_token_id is None:
             raise ValueError("Diffusion training requires diffusion_schedule and mask_token_id")
 
@@ -85,7 +87,7 @@ class OCRTrainer:
                 low=1,
                 high=max(self.diffusion_schedule.timesteps, 2),
                 size=(1,),
-                device=self.device,
+                device=input_ids.device,
             ).item()
         )
         corrupted, prediction_mask = corrupt_with_mask(
@@ -98,9 +100,16 @@ class OCRTrainer:
         if attention_mask is not None:
             prediction_mask &= attention_mask.bool()
         if not prediction_mask.any():
-            prediction_mask = attention_mask.bool() if attention_mask is not None else torch.ones_like(input_ids).bool()
+            prediction_mask = (
+                attention_mask.bool() if attention_mask is not None else torch.ones_like(input_ids).bool()
+            )
 
-        timestep = torch.full((input_ids.shape[0],), timestep_value, dtype=torch.long, device=self.device)
+        timestep = torch.full(
+            (input_ids.shape[0],),
+            timestep_value,
+            dtype=torch.long,
+            device=input_ids.device,
+        )
         output = self.model(
             images=images,
             input_ids=corrupted,
@@ -109,55 +118,154 @@ class OCRTrainer:
             mode="diffusion",
         )
         loss = diffusion_denoising_loss(output.logits, input_ids, prediction_mask)
-        metrics = self._finish_step(loss, images=images, labels=input_ids, log_now=False)
+        labels = input_ids.masked_fill(~prediction_mask, -100)
+        metrics = self._base_metrics(loss, images=images, labels=labels)
+        text_tokens = (
+            attention_mask.sum()
+            if attention_mask is not None
+            else torch.tensor(input_ids.numel(), device=input_ids.device)
+        ).float()
+        masked_tokens = prediction_mask.sum().float()
         metrics.update(
             {
-                "train/diffusion_timestep": float(timestep_value),
-                "train/diffusion_mask_ratio": float(self.diffusion_schedule.mask_ratio(timestep_value)),
-                "train/masked_tokens": float(prediction_mask.sum().detach().cpu()),
+                "train/loss_diffusion": loss.detach(),
+                "train/diffusion_timestep": torch.tensor(float(timestep_value), device=input_ids.device),
+                "train/diffusion_mask_ratio": torch.tensor(
+                    float(self.diffusion_schedule.mask_ratio(timestep_value)),
+                    device=input_ids.device,
+                ),
+                "train/masked_tokens": masked_tokens.detach(),
+                "train/masked_token_fraction": (masked_tokens / text_tokens.clamp_min(1.0)).detach(),
+                "train/text_tokens": text_tokens.detach(),
             }
         )
-        self._log_metrics(metrics)
-        return metrics
+        if self._should_probe():
+            metrics.update(self._diffusion_probe_metrics(images, input_ids, attention_mask))
+        return loss, metrics
 
-    def _finish_step(
+    def _base_metrics(
         self,
         loss: torch.Tensor,
         images: torch.Tensor,
         labels: torch.Tensor,
-        log_now: bool = True,
-    ) -> dict[str, float]:
-        loss.backward()
-        self.optimizer.step()
-        self.optimizer.zero_grad(set_to_none=True)
-        self.state.step += 1
-        metrics = {
-            "train/loss": float(loss.detach().cpu()),
-            "train/lr": float(self.optimizer.param_groups[0]["lr"]),
-            "train/batch_size": float(images.shape[0]),
-            "train/text_tokens": float((labels != -100).sum().detach().cpu()),
+    ) -> dict[str, torch.Tensor]:
+        text_tokens = (labels != -100).sum().float()
+        return {
+            "train/loss": loss.detach(),
+            "train/batch_size": torch.tensor(float(images.shape[0]), device=loss.device),
+            "train/text_tokens": text_tokens.detach(),
+            "train/tokens_per_sample": (text_tokens / images.shape[0]).detach(),
         }
-        if log_now:
-            self._log_metrics(metrics)
+
+    def _log_train_metrics(self, metrics: dict[str, torch.Tensor], batch_size: int) -> None:
+        optimizer = self.optimizers(use_pl_optimizer=False)
+        if optimizer is not None:
+            metrics["train/lr"] = torch.tensor(
+                float(optimizer.param_groups[0]["lr"]),
+                device=self.device,
+            )
+        self.last_metrics = {
+            name: float(value.detach().cpu()) if isinstance(value, torch.Tensor) else float(value)
+            for name, value in metrics.items()
+        }
+        self.log_dict(
+            metrics,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            logger=self.logger is not None,
+            sync_dist=True,
+            batch_size=batch_size,
+        )
+
+    def _should_probe(self) -> bool:
+        step = int(self.global_step) + 1
+        return (
+            self.probe_interval > 0
+            and step % self.probe_interval == 0
+            and self.diffusion_schedule is not None
+            and self.mask_token_id is not None
+            and bool(self.probe_timesteps)
+        )
+
+    @torch.no_grad()
+    def _diffusion_probe_metrics(
+        self,
+        images: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+    ) -> dict[str, torch.Tensor]:
+        if self.diffusion_schedule is None or self.mask_token_id is None:
+            return {}
+
+        was_training = self.model.training
+        self.model.eval()
+        metrics: dict[str, torch.Tensor] = {}
+        normal_losses: dict[int, torch.Tensor] = {}
+
+        for timestep_value in self.probe_timesteps:
+            timestep_value = int(max(0, min(timestep_value, self.diffusion_schedule.timesteps - 1)))
+            corrupted, prediction_mask = self._probe_corruption(input_ids, timestep_value)
+            if attention_mask is not None:
+                prediction_mask &= attention_mask.bool()
+            if not prediction_mask.any():
+                continue
+
+            timestep = torch.full(
+                (input_ids.shape[0],),
+                timestep_value,
+                dtype=torch.long,
+                device=input_ids.device,
+            )
+            for ablation in self.probe_visual_ablations:
+                probe_images = self._ablate_images(images, ablation)
+                output = self.model(
+                    images=probe_images,
+                    input_ids=corrupted,
+                    attention_mask=attention_mask,
+                    timestep=timestep,
+                    mode="diffusion",
+                )
+                loss = diffusion_denoising_loss(output.logits, input_ids, prediction_mask).detach()
+                key = f"probe/{ablation}_loss_t{timestep_value:02d}"
+                metrics[key] = loss
+                if ablation == "normal":
+                    normal_losses[timestep_value] = loss
+                elif timestep_value in normal_losses:
+                    metrics[f"probe/{ablation}_delta_t{timestep_value:02d}"] = (
+                        loss - normal_losses[timestep_value]
+                    )
+
+        if was_training:
+            self.model.train()
         return metrics
 
-    def _log_metrics(self, metrics: dict[str, float]) -> None:
-        if self.logger is not None and self.state.step % self.log_interval == 0:
-            self.logger.log(metrics, step=self.state.step)
+    def _probe_corruption(
+        self,
+        input_ids: torch.Tensor,
+        timestep_value: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        generator = torch.Generator(device=input_ids.device)
+        generator.manual_seed(10_000 + timestep_value)
+        return corrupt_with_mask(
+            input_ids,
+            timestep=timestep_value,
+            schedule=self.diffusion_schedule,
+            mask_token_id=self.mask_token_id,
+            special_token_ids=self.special_token_ids,
+            generator=generator,
+        )
 
-    def fit(self, batches: Iterable[dict], max_steps: int) -> None:
-        while self.state.step < max_steps:
-            progressed = False
-            for batch in batches:
-                metrics = self.train_step(batch)
-                if self.state.step % self.log_interval == 0:
-                    print(
-                        f"step={self.state.step} "
-                        f"loss={metrics['train/loss']:.4f} "
-                        f"lr={metrics['train/lr']:.2e}"
-                    )
-                progressed = True
-                if self.state.step >= max_steps:
-                    break
-            if not progressed:
-                raise ValueError("Training loader produced no batches")
+    def _ablate_images(self, images: torch.Tensor, ablation: str) -> torch.Tensor:
+        if ablation == "normal":
+            return images
+        if ablation == "blank":
+            return torch.zeros_like(images)
+        if ablation == "shuffled":
+            if images.shape[0] == 1:
+                return torch.zeros_like(images)
+            return images.roll(shifts=1, dims=0)
+        raise ValueError(f"Unknown visual ablation: {ablation}")
+
+
+OCRTrainer = OCRLightningModule
