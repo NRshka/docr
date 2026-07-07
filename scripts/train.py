@@ -178,6 +178,11 @@ def main(cfg: DictConfig) -> None:
         probe_visual_ablations=list(cfg.train.get("probe_visual_ablations", [])),
         ar_loss_weight=float(cfg.model.loss_weights.get("ar", 1.0)),
         diffusion_loss_weight=float(cfg.model.loss_weights.get("diffusion", 1.0)),
+        tokenizer=tokenizer,
+        validation_probe_timesteps=list(cfg.train.get("val_probe_timesteps", cfg.train.get("probe_timesteps", []))),
+        validation_visual_ablations=list(
+            cfg.train.get("val_visual_ablations", cfg.train.get("probe_visual_ablations", []))
+        ),
         log_to_logger=bool(cfg.logging.enabled),
     )
 

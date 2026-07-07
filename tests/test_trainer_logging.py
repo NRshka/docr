@@ -52,4 +52,10 @@ def test_lightning_module_logs_validation_metrics():
     assert "val/loss" in module.last_val_metrics
     assert "val/loss_ar" in module.last_val_metrics
     assert "val/text_tokens" in module.last_val_metrics
+    assert "val/token_acc_ar_teacher_forced" in module.last_val_metrics
+    assert "val/cer_ar_teacher_forced" in module.last_val_metrics
+    assert "val/wer_ar_teacher_forced" in module.last_val_metrics
+    assert "val/numeric_exact_match_ar_teacher_forced" in module.last_val_metrics
+    assert "val/exact_match_ar_teacher_forced" in module.last_val_metrics
+    assert "val/normalized_edit_ar_teacher_forced" in module.last_val_metrics
     assert module.last_val_metrics["val/text_tokens"] == 3.0

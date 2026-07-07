@@ -18,6 +18,11 @@ val_batch_size: ${train.batch_size}
 val_check_interval: 250
 check_val_every_n_epoch: 1
 num_sanity_val_steps: 0
+val_probe_timesteps: [1, 8, 16, 31]
+val_visual_ablations:
+  - normal
+  - blank
+  - shuffled
 probe_interval: 50
 probe_timesteps: [1, 4, 8, 16, 24, 31]
 probe_visual_ablations:
