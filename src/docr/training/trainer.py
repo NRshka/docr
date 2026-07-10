@@ -61,6 +61,7 @@ class OCRLightningModule(L.LightningModule):
         self.log_to_logger = log_to_logger
         self.last_metrics: dict[str, float] = {}
         self.last_val_metrics: dict[str, float] = {}
+        self.last_batch_diagnostics = "unavailable"
         self.save_hyperparameters(ignore=["model", "diffusion_schedule", "special_token_ids"])
 
     def configure_optimizers(self):
@@ -96,10 +97,19 @@ class OCRLightningModule(L.LightningModule):
         }
 
     def training_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
-        del batch_idx
         images = batch["images"]
         input_ids = batch["input_ids"]
         attention_mask = batch.get("attention_mask", None)
+        valid_lengths = (
+            attention_mask.sum(dim=1).detach().cpu().tolist()
+            if attention_mask is not None
+            else [input_ids.shape[1]] * input_ids.shape[0]
+        )
+        self.last_batch_diagnostics = (
+            f"batch_idx={batch_idx} image_shape={tuple(images.shape)} "
+            f"text_shape={tuple(input_ids.shape)} valid_lengths={valid_lengths} "
+            f"doc_ids={batch.get('doc_ids', [])}"
+        )
         if self.mode == "joint":
             loss, metrics = self._joint_step(images, input_ids, attention_mask)
         elif self.mode == "diffusion":
@@ -136,7 +146,8 @@ class OCRLightningModule(L.LightningModule):
         for name, parameter in self.named_parameters():
             if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
                 raise FloatingPointError(
-                    f"Non-finite gradient at global_step={self.global_step} parameter={name}"
+                    f"Non-finite gradient at global_step={self.global_step} parameter={name}; "
+                    f"{self.last_batch_diagnostics}"
                 )
 
     def on_before_optimizer_step(self, optimizer) -> None:

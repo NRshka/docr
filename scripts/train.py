@@ -215,6 +215,7 @@ def main(cfg: DictConfig) -> None:
         accumulate_grad_batches=int(cfg.train.gradient_accumulation_steps),
         gradient_clip_val=float(cfg.train.get("gradient_clip_val", 0.0)),
         gradient_clip_algorithm=str(cfg.train.get("gradient_clip_algorithm", "norm")),
+        detect_anomaly=bool(cfg.train.get("detect_anomaly", False)),
         log_every_n_steps=int(cfg.train.log_interval),
         val_check_interval=cfg.train.get("val_check_interval", None),
         check_val_every_n_epoch=cfg.train.get("check_val_every_n_epoch", 1),

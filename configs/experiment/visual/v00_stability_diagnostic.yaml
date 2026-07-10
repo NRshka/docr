@@ -21,6 +21,7 @@ train:
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
   float32_matmul_precision: high
+  detect_anomaly: true
   max_steps: 120
   checkpoint_interval: 0
   log_interval: 1
