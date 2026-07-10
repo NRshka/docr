@@ -9,7 +9,7 @@ from typing import Protocol
 import torch
 from torch.utils.data import Dataset
 
-from docr.data.manifest import ManifestRecord, read_manifest
+from docr.data.manifest import read_manifest
 from docr.data.transforms import build_image_transform, load_rgb_image
 
 
@@ -32,10 +32,16 @@ class ManifestOCRDataset(Dataset[dict]):
         image_size: tuple[int, int] = (1024, 768),
         tokenizer: TokenizerLike | None = None,
         max_text_length: int | None = None,
+        preserve_aspect_ratio: bool = False,
+        image_normalization: str = "none",
     ) -> None:
         self.records = read_manifest(manifest_path)
         self.image_root = Path(image_root)
-        self.transform = build_image_transform(image_size)
+        self.transform = build_image_transform(
+            image_size,
+            preserve_aspect_ratio=preserve_aspect_ratio,
+            normalization=image_normalization,
+        )
         self.tokenizer = tokenizer
         self.max_text_length = max_text_length
 
@@ -122,6 +128,8 @@ class HFCordV2OCRDataset(Dataset[dict]):
         max_samples: int | None = 8,
         tokenizer: TokenizerLike | None = None,
         max_text_length: int | None = None,
+        preserve_aspect_ratio: bool = False,
+        image_normalization: str = "none",
     ) -> None:
         try:
             from datasets import load_dataset, load_from_disk as hf_load_from_disk
@@ -148,7 +156,11 @@ class HFCordV2OCRDataset(Dataset[dict]):
                 dataset = dataset.select(range(min(max_samples, len(dataset))))
             self.records = list(dataset)
 
-        self.transform = build_image_transform(image_size)
+        self.transform = build_image_transform(
+            image_size,
+            preserve_aspect_ratio=preserve_aspect_ratio,
+            normalization=image_normalization,
+        )
         self.target_mode = target_mode
         self.tokenizer = tokenizer
         self.max_text_length = max_text_length

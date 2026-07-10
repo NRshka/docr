@@ -70,6 +70,8 @@ def build_lightning_logger(cfg: DictConfig):
 
 def build_dataset(cfg: DictConfig, tokenizer, split: str):
     image_size = tuple(cfg.model.image_size)
+    preserve_aspect_ratio = bool(cfg.model.vision.get("preserve_aspect_ratio", False))
+    image_normalization = str(cfg.model.vision.get("image_normalization", "none"))
     if cfg.data.name == "synthetic":
         num_samples = cfg.data.get("num_train", 4) if split == "train" else cfg.data.get("num_val", 0)
         if int(num_samples) <= 0:
@@ -87,6 +89,8 @@ def build_dataset(cfg: DictConfig, tokenizer, split: str):
             image_size=image_size,
             tokenizer=tokenizer,
             max_text_length=cfg.data.max_text_length,
+            preserve_aspect_ratio=preserve_aspect_ratio,
+            image_normalization=image_normalization,
         )
     if cfg.data.name == "cord_v2":
         hf_split = cfg.data.split if split == "train" else cfg.data.get("val_split", "validation")
@@ -102,6 +106,8 @@ def build_dataset(cfg: DictConfig, tokenizer, split: str):
             max_samples=max_samples,
             tokenizer=tokenizer,
             max_text_length=cfg.data.max_text_length,
+            preserve_aspect_ratio=preserve_aspect_ratio,
+            image_normalization=image_normalization,
         )
     raise ValueError(f"Unknown dataset: {cfg.data.name}")
 

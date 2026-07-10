@@ -7,6 +7,8 @@ model:
   vision:
     backbone: sam
     freeze_backbone: true
+    preserve_aspect_ratio: false
+    image_normalization: none
   compressor:
     type: perceiver
     num_layers: 2
@@ -19,7 +21,7 @@ train:
   learning_rate: 5.0e-5
   pretrained_learning_rate: 1.0e-5
   scheduler: cosine
-  warmup_steps: 100
+  warmup_steps: 0.1
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
   float32_matmul_precision: high

@@ -5,6 +5,8 @@ vision:
   backbone: sam
   backbone_name: facebook/sam-vit-base
   freeze_backbone: true
+  preserve_aspect_ratio: true
+  image_normalization: sam
   local_files_only: false
   trust_remote_code: false
   sdpa_backend: safe

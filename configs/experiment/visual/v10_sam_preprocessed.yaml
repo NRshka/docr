@@ -1,0 +1,38 @@
+# @package _global_
+# V00 with only the visual input contract corrected: SAM normalization and no distortion.
+model:
+  name: joint_qwen-v10-sam-preprocessed-768
+  image_size: [1024, 1024]
+  visual_tokens: 768
+  vision:
+    backbone: sam
+    freeze_backbone: true
+    preserve_aspect_ratio: true
+    image_normalization: sam
+  compressor:
+    type: perceiver
+    num_layers: 2
+  decoder:
+    sdpa_backend: safe
+
+train:
+  batch_size: 8
+  gradient_accumulation_steps: 1
+  learning_rate: 5.0e-5
+  pretrained_learning_rate: 1.0e-5
+  scheduler: cosine
+  warmup_steps: 0.1
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  float32_matmul_precision: high
+  max_steps: 500
+  checkpoint_interval: 250
+  log_interval: 10
+  validate: true
+  val_check_interval: 250
+  probe_interval: 50
+
+output_dir: outputs/visual/v10_sam_preprocessed
+logging:
+  run_name: visual-v10-sam-preprocessed-768
+  tags: [visual-study, sam, preprocessing, aspect-ratio]
