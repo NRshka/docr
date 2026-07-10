@@ -1,0 +1,25 @@
+# @package _global_
+# Current joint_qwen visual stack. Use this as the immutable control.
+model:
+  name: joint_qwen-v00-sam-frozen-768
+  image_size: [1024, 1024]
+  visual_tokens: 768
+  vision:
+    backbone: sam
+    freeze_backbone: true
+  compressor:
+    type: perceiver
+    num_layers: 2
+
+train:
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  max_steps: 2000
+  checkpoint_interval: 500
+  val_check_interval: 250
+
+output_dir: outputs/visual/v00_sam_frozen_control
+logging:
+  run_name: visual-v00-sam-frozen-768
+  tags: [visual-study, control, sam, frozen]
+

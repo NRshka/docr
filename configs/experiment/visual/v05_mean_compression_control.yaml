@@ -1,0 +1,24 @@
+# @package _global_
+# Negative control: removes spatial differentiation from visual memory.
+model:
+  name: joint_qwen-v05-sam-mean-768
+  image_size: [1024, 1024]
+  visual_tokens: 768
+  vision:
+    backbone: sam
+    freeze_backbone: true
+  compressor:
+    type: mean
+
+train:
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  max_steps: 500
+  checkpoint_interval: 250
+  val_check_interval: 250
+
+output_dir: outputs/visual/v05_mean_compression_control
+logging:
+  run_name: visual-v05-sam-mean-768
+  tags: [visual-study, negative-control, mean-compression]
+
