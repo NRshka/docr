@@ -10,10 +10,15 @@ def build_scheduler(
     optimizer: Optimizer,
     name: str,
     max_steps: int,
-    warmup_steps: int = 0,
+    warmup_steps: int | float = 0,
 ) -> LRScheduler:
     if max_steps <= 0:
         raise ValueError("max_steps must be positive")
+    if isinstance(warmup_steps, float) and 0.0 < warmup_steps < 1.0:
+        warmup_steps = max(1, round(max_steps * warmup_steps))
+    elif isinstance(warmup_steps, float) and not warmup_steps.is_integer():
+        raise ValueError("fractional warmup_steps must satisfy 0 < warmup_steps < 1")
+    warmup_steps = int(warmup_steps)
     if warmup_steps < 0 or warmup_steps >= max_steps:
         raise ValueError("warmup_steps must satisfy 0 <= warmup_steps < max_steps")
 

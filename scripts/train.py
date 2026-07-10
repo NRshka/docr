@@ -174,7 +174,7 @@ def main(cfg: DictConfig) -> None:
         ),
         weight_decay=float(cfg.train.weight_decay),
         scheduler_name=str(cfg.train.get("scheduler", "constant")),
-        warmup_steps=int(cfg.train.get("warmup_steps", 0)),
+        warmup_steps=float(cfg.train.get("warmup_steps", 0)),
         max_steps=int(cfg.train.max_steps),
         mode=str(cfg.train.name),
         diffusion_schedule=diffusion_schedule,

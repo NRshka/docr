@@ -20,7 +20,7 @@ class OCRLightningModule(L.LightningModule):
         pretrained_learning_rate: float | None = None,
         weight_decay: float = 0.01,
         scheduler_name: str = "constant",
-        warmup_steps: int = 0,
+        warmup_steps: int | float = 0,
         max_steps: int = 1000,
         mode: str = "ar",
         diffusion_schedule: DiscreteDiffusionSchedule | None = None,
