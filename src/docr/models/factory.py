@@ -5,11 +5,18 @@ from typing import Any
 from docr.models.decoder import DiffusionTransformerDecoder, OCRModel, QwenVisualPrefixDecoder
 from docr.models.decoder import TinyTextDecoder
 from docr.models.qwen_unified import UnifiedQwenDecoder
-from docr.models.vision_encoder import SamVisionEncoder, TinyVisionEncoder
+from docr.models.vision_encoder import CogViTOCRVisionEncoder, SamVisionEncoder, TinyVisionEncoder
 
 
 def build_vision_encoder(cfg: Any):
     backbone = str(cfg.model.vision.get("backbone", "patch"))
+    if backbone == "cogvit_ocr":
+        return CogViTOCRVisionEncoder(
+            backbone_name=str(cfg.model.vision.get("backbone_name", "zai-org/GLM-OCR")),
+            freeze_backbone=bool(cfg.model.vision.get("freeze_backbone", True)),
+            local_files_only=bool(cfg.model.vision.get("local_files_only", False)),
+            trust_remote_code=bool(cfg.model.vision.get("trust_remote_code", False)),
+        )
     common = {
         "hidden_size": int(cfg.model.vision.hidden_size),
         "output_tokens": int(cfg.model.visual_tokens),

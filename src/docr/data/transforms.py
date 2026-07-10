@@ -19,6 +19,10 @@ class BasicImageTransform:
         # SAM uses the conventional ImageNet RGB statistics. Applying them to [0, 1]
         # tensors is equivalent to the processor's 0-255 mean/std values.
         "sam": ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        "glm_ocr": (
+            (0.48145466, 0.4578275, 0.40821073),
+            (0.26862954, 0.26130258, 0.27577711),
+        ),
     }
 
     def __init__(

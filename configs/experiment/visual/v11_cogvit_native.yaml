@@ -1,0 +1,27 @@
+# @package _global_
+# Frozen GLM-OCR CogViT with its native 2x2 spatial merger; no Perceiver.
+model:
+  name: joint-qwen-v11-cogvit-native-864
+
+train:
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-5
+  pretrained_learning_rate: 1.0e-5
+  scheduler: cosine
+  warmup_steps: 0.1
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  float32_matmul_precision: high
+  max_steps: 500
+  checkpoint_interval: 250
+  log_interval: 10
+  validate: true
+  val_batch_size: 2
+  val_check_interval: 250
+  probe_interval: 50
+
+output_dir: outputs/visual/v11_cogvit_native
+logging:
+  run_name: visual-v11-cogvit-native-864
+  tags: [visual-study, cogvit, glm-ocr, native-spatial-merge, no-perceiver]

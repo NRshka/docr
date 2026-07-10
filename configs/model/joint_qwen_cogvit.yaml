@@ -1,0 +1,45 @@
+name: joint_qwen_cogvit
+image_size: [672, 1008]
+# Native CogViT merged grid: (672 / 14 / 2) * (1008 / 14 / 2) = 864.
+visual_tokens: 864
+vision:
+  backbone: cogvit_ocr
+  backbone_name: zai-org/GLM-OCR
+  freeze_backbone: true
+  local_files_only: false
+  trust_remote_code: false
+  hidden_size: 1536
+  preserve_aspect_ratio: true
+  image_normalization: glm_ocr
+compressor:
+  type: none
+decoder:
+  implementation: qwen_unified
+  backbone_name: Qwen/Qwen2.5-0.5B
+  tokenizer_name: Qwen/Qwen2.5-0.5B
+  hidden_size: 512
+  vocab_size: 256
+  random_init: false
+  intermediate_size: 2048
+  num_hidden_layers: 4
+  num_attention_heads: 8
+  num_key_value_heads: 4
+  max_position_embeddings: 4096
+  mode: joint
+  freeze_lm: false
+  local_files_only: false
+  trust_remote_code: false
+  sdpa_backend: safe
+canvas:
+  length: 128
+  num_canvases: 1
+diffusion:
+  timesteps: 32
+  mask_token: <|docr_mask|>
+  mask_token_id: null
+  min_mask_ratio: 0.05
+  max_mask_ratio: 0.95
+loss_weights:
+  ar: 1.0
+  diffusion: 1.0
+  refinement: 0.0

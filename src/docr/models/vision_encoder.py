@@ -140,3 +140,101 @@ class SamVisionEncoder(nn.Module):
             raise ValueError("SAM vision output must have shape [batch, channels, h, w] or [batch, seq, dim]")
         features = self.norm(self.proj(features))
         return self.compressor(features)
+
+
+class CogViTOCRVisionEncoder(nn.Module):
+    """GLM-OCR CogViT tower with its native spatial merger and no Perceiver.
+
+    Input images must already be normalized and have height/width divisible by
+    ``patch_size * spatial_merge_size``. Static images are duplicated across the
+    temporal patch dimension exactly as the official GLM image processor does.
+    """
+
+    def __init__(
+        self,
+        backbone_name: str = "zai-org/GLM-OCR",
+        freeze_backbone: bool = True,
+        local_files_only: bool = False,
+        trust_remote_code: bool = False,
+        backbone: nn.Module | None = None,
+    ) -> None:
+        super().__init__()
+        if backbone is None:
+            from transformers import GlmOcrForConditionalGeneration
+
+            full_model = GlmOcrForConditionalGeneration.from_pretrained(
+                backbone_name,
+                local_files_only=local_files_only,
+                trust_remote_code=trust_remote_code,
+            )
+            backbone = full_model.model.visual
+            del full_model
+        self.backbone = backbone
+        self.patch_size = int(self.backbone.config.patch_size)
+        self.temporal_patch_size = int(self.backbone.config.temporal_patch_size)
+        self.spatial_merge_size = int(self.backbone.config.spatial_merge_size)
+        self.output_dim = int(self.backbone.config.out_hidden_size)
+
+        if freeze_backbone:
+            self.backbone.eval()
+            for parameter in self.backbone.parameters():
+                parameter.requires_grad = False
+
+    def train(self, mode: bool = True) -> "CogViTOCRVisionEncoder":
+        super().train(mode)
+        if not any(parameter.requires_grad for parameter in self.backbone.parameters()):
+            self.backbone.eval()
+        return self
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        flattened_patches, grid_thw = self._patchify(images)
+        if any(parameter.requires_grad for parameter in self.backbone.parameters()):
+            outputs = self.backbone(flattened_patches, grid_thw=grid_thw)
+        else:
+            with torch.no_grad():
+                outputs = self.backbone(flattened_patches, grid_thw=grid_thw)
+
+        tokens_per_image = (
+            grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]
+        ) // self.spatial_merge_size**2
+        if not torch.equal(tokens_per_image, tokens_per_image[:1].expand_as(tokens_per_image)):
+            raise ValueError("Fixed-batch CogViT currently requires equal visual token counts")
+        return outputs.pooler_output.view(images.shape[0], int(tokens_per_image[0]), self.output_dim)
+
+    def _patchify(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if images.ndim != 4 or images.shape[1] != 3:
+            raise ValueError("CogViT images must have shape [batch, 3, height, width]")
+        batch_size, channels, height, width = images.shape
+        merge_stride = self.patch_size * self.spatial_merge_size
+        if height % merge_stride != 0 or width % merge_stride != 0:
+            raise ValueError(
+                f"CogViT image size must be divisible by {merge_stride}, got {height}x{width}"
+            )
+
+        patches = images.unsqueeze(1).repeat(1, self.temporal_patch_size, 1, 1, 1)
+        grid_t = 1
+        grid_h = height // self.patch_size
+        grid_w = width // self.patch_size
+        patches = patches.view(
+            batch_size,
+            grid_t,
+            self.temporal_patch_size,
+            channels,
+            grid_h // self.spatial_merge_size,
+            self.spatial_merge_size,
+            self.patch_size,
+            grid_w // self.spatial_merge_size,
+            self.spatial_merge_size,
+            self.patch_size,
+        )
+        patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
+        flattened = patches.reshape(
+            batch_size * grid_t * grid_h * grid_w,
+            channels * self.temporal_patch_size * self.patch_size * self.patch_size,
+        )
+        grid_thw = torch.tensor(
+            [[grid_t, grid_h, grid_w]] * batch_size,
+            dtype=torch.long,
+            device=images.device,
+        )
+        return flattened, grid_thw
