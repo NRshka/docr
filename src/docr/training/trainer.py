@@ -9,6 +9,7 @@ from torch.optim import AdamW
 from docr.evaluation.metrics import ocr_metrics
 from docr.models.diffusion import DiscreteDiffusionSchedule, corrupt_with_mask
 from docr.training.losses import diffusion_denoising_loss, language_model_loss
+from docr.training.schedules import build_scheduler
 
 
 class OCRLightningModule(L.LightningModule):
@@ -16,7 +17,11 @@ class OCRLightningModule(L.LightningModule):
         self,
         model: torch.nn.Module,
         learning_rate: float = 1e-4,
+        pretrained_learning_rate: float | None = None,
         weight_decay: float = 0.01,
+        scheduler_name: str = "constant",
+        warmup_steps: int = 0,
+        max_steps: int = 1000,
         mode: str = "ar",
         diffusion_schedule: DiscreteDiffusionSchedule | None = None,
         mask_token_id: int | None = None,
@@ -34,7 +39,13 @@ class OCRLightningModule(L.LightningModule):
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
+        self.pretrained_learning_rate = (
+            learning_rate if pretrained_learning_rate is None else pretrained_learning_rate
+        )
         self.weight_decay = weight_decay
+        self.scheduler_name = scheduler_name
+        self.warmup_steps = warmup_steps
+        self.max_steps = max_steps
         self.mode = mode
         self.diffusion_schedule = diffusion_schedule
         self.mask_token_id = mask_token_id
@@ -52,8 +63,37 @@ class OCRLightningModule(L.LightningModule):
         self.last_val_metrics: dict[str, float] = {}
         self.save_hyperparameters(ignore=["model", "diffusion_schedule", "special_token_ids"])
 
-    def configure_optimizers(self) -> AdamW:
-        return AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+    def configure_optimizers(self):
+        pretrained = []
+        new_modules = []
+        for name, parameter in self.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            if ".decoder.lm." in name or ".vision_encoder.backbone." in name:
+                pretrained.append(parameter)
+            else:
+                new_modules.append(parameter)
+
+        parameter_groups = []
+        if pretrained:
+            parameter_groups.append(
+                {"params": pretrained, "lr": self.pretrained_learning_rate, "name": "pretrained"}
+            )
+        if new_modules:
+            parameter_groups.append(
+                {"params": new_modules, "lr": self.learning_rate, "name": "new_modules"}
+            )
+        optimizer = AdamW(parameter_groups, weight_decay=self.weight_decay)
+        scheduler = build_scheduler(
+            optimizer,
+            name=self.scheduler_name,
+            max_steps=self.max_steps,
+            warmup_steps=self.warmup_steps,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},
+        }
 
     def training_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
         del batch_idx
@@ -66,6 +106,7 @@ class OCRLightningModule(L.LightningModule):
             loss, metrics = self._diffusion_step(images, input_ids, attention_mask)
         else:
             loss, metrics = self._ar_step(images, input_ids, attention_mask)
+        self._require_finite(loss, "training loss")
         self._log_train_metrics(metrics, batch_size=images.shape[0])
         return loss
 
@@ -85,10 +126,42 @@ class OCRLightningModule(L.LightningModule):
             )
         else:
             loss, metrics = self._ar_step(images, input_ids, attention_mask)
+        self._require_finite(loss, "validation loss")
         metrics.update(self._validation_quality_metrics(images, input_ids, attention_mask))
         val_metrics = self._with_metric_prefix(metrics, "val")
         self._log_val_metrics(val_metrics, batch_size=images.shape[0])
         return loss
+
+    def on_after_backward(self) -> None:
+        for name, parameter in self.named_parameters():
+            if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
+                raise FloatingPointError(
+                    f"Non-finite gradient at global_step={self.global_step} parameter={name}"
+                )
+
+    def on_before_optimizer_step(self, optimizer) -> None:
+        del optimizer
+        gradients = [
+            parameter.grad.detach().float().norm(2)
+            for parameter in self.parameters()
+            if parameter.grad is not None
+        ]
+        if not gradients:
+            return
+        grad_norm = torch.stack(gradients).norm(2)
+        self._require_finite(grad_norm, "gradient norm")
+        self.log(
+            "train/grad_norm",
+            grad_norm,
+            on_step=True,
+            on_epoch=False,
+            logger=self.log_to_logger,
+            sync_dist=True,
+        )
+
+    def _require_finite(self, value: torch.Tensor, label: str) -> None:
+        if not torch.isfinite(value).all():
+            raise FloatingPointError(f"Non-finite {label} at global_step={self.global_step}")
 
     def _ar_step(
         self,

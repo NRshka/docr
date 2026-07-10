@@ -1,0 +1,35 @@
+# @package _global_
+# Short, fail-fast rerun after xlv2kuo1 diverged between optimizer steps 50 and 59.
+model:
+  name: joint_qwen-v00-stability-diagnostic
+  image_size: [1024, 1024]
+  visual_tokens: 768
+  vision:
+    backbone: sam
+    freeze_backbone: true
+  compressor:
+    type: perceiver
+    num_layers: 2
+
+train:
+  batch_size: 8
+  gradient_accumulation_steps: 1
+  learning_rate: 5.0e-5
+  pretrained_learning_rate: 1.0e-5
+  scheduler: cosine
+  warmup_steps: 100
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  float32_matmul_precision: high
+  max_steps: 120
+  checkpoint_interval: 0
+  log_interval: 1
+  validate: false
+  probe_interval: 0
+  probe_timesteps: []
+  probe_visual_ablations: []
+
+output_dir: outputs/visual/v00_stability_diagnostic
+logging:
+  run_name: visual-v00-stability-diagnostic
+  tags: [visual-study, control, stability, fail-fast]

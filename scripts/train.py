@@ -122,6 +122,7 @@ def build_loader(cfg: DictConfig, dataset, collator: OCRCollator, split: str):
 def main(cfg: DictConfig) -> None:
     seed_everything(int(cfg.seed))
     L.seed_everything(int(cfg.seed), workers=True)
+    torch.set_float32_matmul_precision(str(cfg.train.get("float32_matmul_precision", "high")))
     if bool(cfg.train.get("suppress_accumulate_grad_stream_warning", False)):
         torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
     tokenizer = build_tokenizer(cfg)
@@ -168,7 +169,13 @@ def main(cfg: DictConfig) -> None:
     lightning_module = OCRLightningModule(
         model=model,
         learning_rate=float(cfg.train.learning_rate),
+        pretrained_learning_rate=float(
+            cfg.train.get("pretrained_learning_rate", cfg.train.learning_rate)
+        ),
         weight_decay=float(cfg.train.weight_decay),
+        scheduler_name=str(cfg.train.get("scheduler", "constant")),
+        warmup_steps=int(cfg.train.get("warmup_steps", 0)),
+        max_steps=int(cfg.train.max_steps),
         mode=str(cfg.train.name),
         diffusion_schedule=diffusion_schedule,
         mask_token_id=mask_token_id,
@@ -206,6 +213,8 @@ def main(cfg: DictConfig) -> None:
         precision=lightning_precision(str(cfg.train.precision)),
         max_steps=int(cfg.train.max_steps),
         accumulate_grad_batches=int(cfg.train.gradient_accumulation_steps),
+        gradient_clip_val=float(cfg.train.get("gradient_clip_val", 0.0)),
+        gradient_clip_algorithm=str(cfg.train.get("gradient_clip_algorithm", "norm")),
         log_every_n_steps=int(cfg.train.log_interval),
         val_check_interval=cfg.train.get("val_check_interval", None),
         check_val_every_n_epoch=cfg.train.get("check_val_every_n_epoch", 1),
