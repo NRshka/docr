@@ -10,9 +10,12 @@ model:
   compressor:
     type: perceiver
     num_layers: 2
+  decoder:
+    sdpa_backend: math
 
 train:
-  batch_size: 8
+  # Math SDPA materializes attention and needs more memory than fused cuDNN SDPA.
+  batch_size: 4
   gradient_accumulation_steps: 1
   learning_rate: 5.0e-5
   pretrained_learning_rate: 1.0e-5
@@ -21,8 +24,8 @@ train:
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
   float32_matmul_precision: high
-  detect_anomaly: true
-  max_steps: 120
+  detect_anomaly: false
+  max_steps: 80
   checkpoint_interval: 0
   log_interval: 1
   validate: false

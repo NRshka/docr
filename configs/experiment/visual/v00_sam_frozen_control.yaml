@@ -10,6 +10,8 @@ model:
   compressor:
     type: perceiver
     num_layers: 2
+  decoder:
+    sdpa_backend: safe
 
 train:
   batch_size: 2

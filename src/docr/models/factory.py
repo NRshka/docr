@@ -83,6 +83,7 @@ def build_model(cfg: Any) -> OCRModel:
             freeze_lm=bool(cfg.model.decoder.get("freeze_lm", False)),
             local_files_only=bool(cfg.model.decoder.get("local_files_only", False)),
             trust_remote_code=bool(cfg.model.decoder.get("trust_remote_code", False)),
+            sdpa_backend=str(cfg.model.decoder.get("sdpa_backend", "safe")),
             config=qwen_config,
         )
     elif implementation == "diffusion_transformer":

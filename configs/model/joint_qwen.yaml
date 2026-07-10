@@ -7,6 +7,7 @@ vision:
   freeze_backbone: true
   local_files_only: false
   trust_remote_code: false
+  sdpa_backend: safe
   patch_size: 16
   hidden_size: 512
   num_layers: 4

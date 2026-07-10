@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -93,6 +94,7 @@ class UnifiedQwenDecoder(nn.Module):
         freeze_lm: bool = False,
         local_files_only: bool = False,
         trust_remote_code: bool = False,
+        sdpa_backend: str = "safe",
         config: Any | None = None,
     ) -> None:
         super().__init__()
@@ -114,6 +116,7 @@ class UnifiedQwenDecoder(nn.Module):
         self.timestep_embed = nn.Embedding(timesteps, hidden_size)
         self.num_canvases = num_canvases
         self.canvas_length = canvas_length
+        self.sdpa_backend = sdpa_backend
 
         if freeze_lm:
             for parameter in self.lm.parameters():
@@ -208,17 +211,38 @@ class UnifiedQwenDecoder(nn.Module):
         )
         mask_mapping = {layer_type: attention_mask for layer_type in set(layer_types)}
 
-        for layer_idx, decoder_layer in enumerate(model.layers[: model.config.num_hidden_layers]):
-            hidden_states = decoder_layer(
-                hidden_states,
-                attention_mask=mask_mapping[layer_types[layer_idx]],
-                position_ids=position_ids,
-                position_embeddings=position_embeddings,
-                past_key_values=None,
-                use_cache=False,
-            )
+        with self._sdpa_kernel_context(inputs_embeds.device):
+            for layer_idx, decoder_layer in enumerate(model.layers[: model.config.num_hidden_layers]):
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    attention_mask=mask_mapping[layer_types[layer_idx]],
+                    position_ids=position_ids,
+                    position_embeddings=position_embeddings,
+                    past_key_values=None,
+                    use_cache=False,
+                )
 
         return model.norm(hidden_states)
+
+    def _sdpa_kernel_context(self, device: torch.device):
+        if device.type != "cuda" or self.sdpa_backend == "auto":
+            return nullcontext()
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+
+        if self.sdpa_backend == "math":
+            backends = [SDPBackend.MATH]
+        elif self.sdpa_backend == "safe":
+            # cuDNN SDPA backward has produced deterministic NaN query gradients with the
+            # block/custom additive masks used here. Prefer fused kernels when supported,
+            # retain math as a stable fallback, and deliberately exclude cuDNN attention.
+            backends = [
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
+            ]
+        else:
+            raise ValueError(f"Unknown SDPA backend policy: {self.sdpa_backend}")
+        return sdpa_kernel(backends)
 
     def _active_canvas_length(self, text_length: int) -> int | None:
         if self.num_canvases == 1:
