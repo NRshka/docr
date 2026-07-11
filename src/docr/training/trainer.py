@@ -7,7 +7,12 @@ import torch
 from torch.optim import AdamW
 
 from docr.evaluation.metrics import ocr_metrics
-from docr.models.diffusion import DiscreteDiffusionSchedule, corrupt_with_mask
+from docr.models.diffusion import (
+    BlockCorruptionBatch,
+    DiscreteDiffusionSchedule,
+    corrupt_contiguous_blocks,
+    corrupt_with_mask,
+)
 from docr.training.losses import diffusion_denoising_loss, language_model_loss
 from docr.training.schedules import build_scheduler
 
@@ -37,6 +42,7 @@ class OCRLightningModule(L.LightningModule):
         log_to_logger: bool = True,
         gradient_diagnostic_interval: int = 0,
         gradient_diagnostic_scope: str = "qwen",
+        diffusion_block_length: int = 16,
     ) -> None:
         super().__init__()
         self.model = model
@@ -63,6 +69,7 @@ class OCRLightningModule(L.LightningModule):
         self.log_to_logger = log_to_logger
         self.gradient_diagnostic_interval = gradient_diagnostic_interval
         self.gradient_diagnostic_scope = gradient_diagnostic_scope
+        self.diffusion_block_length = diffusion_block_length
         self._last_gradient_diagnostic_step = -1
         self.last_metrics: dict[str, float] = {}
         self.last_val_metrics: dict[str, float] = {}
@@ -115,7 +122,14 @@ class OCRLightningModule(L.LightningModule):
             f"text_shape={tuple(input_ids.shape)} valid_lengths={valid_lengths} "
             f"doc_ids={batch.get('doc_ids', [])}"
         )
-        if self.mode == "joint":
+        if self.mode == "tri_mode_joint":
+            loss, metrics = self._tri_mode_step(
+                images,
+                input_ids,
+                attention_mask,
+                include_gradient_diagnostics=self._should_measure_gradient_conflict(),
+            )
+        elif self.mode == "joint":
             loss, metrics = self._joint_step(
                 images,
                 input_ids,
@@ -131,18 +145,34 @@ class OCRLightningModule(L.LightningModule):
         return loss
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
-        del batch_idx
         images = batch["images"]
         input_ids = batch["input_ids"]
         attention_mask = batch.get("attention_mask", None)
-        if self.mode == "joint":
-            loss, metrics = self._joint_step(images, input_ids, attention_mask, include_probes=False)
+        generator = self._validation_generator(batch_idx, input_ids.device)
+        if self.mode == "tri_mode_joint":
+            loss, metrics = self._tri_mode_step(
+                images,
+                input_ids,
+                attention_mask,
+                generator=generator,
+                include_gradient_diagnostics=False,
+                include_visual_ablations=True,
+            )
+        elif self.mode == "joint":
+            loss, metrics = self._joint_step(
+                images,
+                input_ids,
+                attention_mask,
+                include_probes=False,
+                generator=generator,
+            )
         elif self.mode == "diffusion":
             loss, metrics = self._diffusion_step(
                 images,
                 input_ids,
                 attention_mask,
                 include_probes=False,
+                generator=generator,
             )
         else:
             loss, metrics = self._ar_step(images, input_ids, attention_mask)
@@ -221,6 +251,7 @@ class OCRLightningModule(L.LightningModule):
         attention_mask: torch.Tensor | None,
         visual_tokens: torch.Tensor | None = None,
         include_probes: bool = True,
+        generator: torch.Generator | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if self.diffusion_schedule is None or self.mask_token_id is None:
             raise ValueError("Diffusion training requires diffusion_schedule and mask_token_id")
@@ -231,6 +262,7 @@ class OCRLightningModule(L.LightningModule):
                 high=max(self.diffusion_schedule.timesteps, 2),
                 size=(1,),
                 device=input_ids.device,
+                generator=generator,
             ).item()
         )
         corrupted, prediction_mask = corrupt_with_mask(
@@ -239,6 +271,7 @@ class OCRLightningModule(L.LightningModule):
             schedule=self.diffusion_schedule,
             mask_token_id=self.mask_token_id,
             special_token_ids=self.special_token_ids,
+            generator=generator,
         )
         if attention_mask is not None:
             prediction_mask &= attention_mask.bool()
@@ -303,6 +336,7 @@ class OCRLightningModule(L.LightningModule):
         attention_mask: torch.Tensor | None,
         include_probes: bool = True,
         include_gradient_diagnostics: bool = False,
+        generator: torch.Generator | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         visual_tokens = self.model.encode_images(images)
         ar_loss, ar_metrics = self._ar_step(
@@ -317,6 +351,7 @@ class OCRLightningModule(L.LightningModule):
             attention_mask,
             visual_tokens=visual_tokens,
             include_probes=False,
+            generator=generator,
         )
         weighted_ar = self.ar_loss_weight * ar_loss
         weighted_diffusion = self.diffusion_loss_weight * diffusion_loss
@@ -350,10 +385,179 @@ class OCRLightningModule(L.LightningModule):
         metrics.update(gradient_metrics)
         return loss, metrics
 
+    def _tri_mode_step(
+        self,
+        images: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        generator: torch.Generator | None = None,
+        include_gradient_diagnostics: bool = False,
+        include_visual_ablations: bool = False,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if self.diffusion_schedule is None or self.mask_token_id is None:
+            raise ValueError("tri-mode training requires a diffusion schedule and mask token")
+        block = corrupt_contiguous_blocks(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            block_length=self.diffusion_block_length,
+            schedule=self.diffusion_schedule,
+            mask_token_id=self.mask_token_id,
+            special_token_ids=self.special_token_ids,
+            generator=generator,
+        )
+        visual_tokens = self.model.encode_images(images)
+        output = self.model.decode_dual_stream(
+            clean_input_ids=input_ids,
+            noisy_block_ids=block.noisy_ids,
+            block_starts=block.starts,
+            visual_tokens=visual_tokens,
+            clean_attention_mask=attention_mask,
+            noisy_block_mask=block.valid_mask,
+            timestep=block.timesteps,
+        )
+        ar_labels = input_ids.clone()
+        if attention_mask is not None:
+            ar_labels = ar_labels.masked_fill(~attention_mask.bool(), -100)
+        ar_loss = language_model_loss(output.ar_logits, ar_labels, ignore_index=-100)
+        diffusion_loss = diffusion_denoising_loss(
+            output.diffusion_logits,
+            block.targets,
+            block.prediction_mask,
+        )
+        weighted_ar = self.ar_loss_weight * ar_loss
+        weighted_diffusion = self.diffusion_loss_weight * diffusion_loss
+        gradient_metrics = {}
+        if include_gradient_diagnostics:
+            gradient_metrics = self._gradient_conflict_metrics(ar_loss, diffusion_loss)
+            gradient_metrics.update(
+                self._weighted_gradient_diagnostic_metrics(gradient_metrics)
+            )
+            self._last_gradient_diagnostic_step = int(self.global_step)
+        loss = weighted_ar + weighted_diffusion
+        diffusion_labels = block.targets.masked_fill(~block.prediction_mask, -100)
+        metrics = {
+            "train/loss": loss.detach(),
+            "train/loss_ar": ar_loss.detach(),
+            "train/loss_diffusion": diffusion_loss.detach(),
+            "train/loss_ar_weighted": weighted_ar.detach(),
+            "train/loss_diffusion_weighted": weighted_diffusion.detach(),
+            "train/token_acc_ar": self._token_accuracy(output.ar_logits, ar_labels),
+            "train/token_acc_diffusion_masked": self._token_accuracy(
+                output.diffusion_logits, diffusion_labels
+            ),
+            "train/ar_loss_weight": torch.tensor(self.ar_loss_weight, device=loss.device),
+            "train/diffusion_loss_weight": torch.tensor(
+                self.diffusion_loss_weight, device=loss.device
+            ),
+            "train/text_tokens": (ar_labels != -100).sum().float(),
+            "train/text_tokens_ar": (ar_labels != -100).sum().float(),
+            "train/tokens_per_sample": (
+                (ar_labels != -100).sum().float() / input_ids.shape[0]
+            ),
+            "train/masked_tokens": block.prediction_mask.sum().float(),
+            "train/masked_token_fraction": (
+                block.prediction_mask.sum().float() / block.valid_mask.sum().clamp_min(1).float()
+            ),
+            "train/diffusion_timestep": block.timesteps.float().mean(),
+            "train/diffusion_mask_ratio": block.mask_ratios.mean(),
+            "train/block_start_mean": block.starts.float().mean(),
+            "train/block_valid_tokens": block.valid_mask.sum().float(),
+            "train/block_length": torch.tensor(
+                float(self.diffusion_block_length), device=loss.device
+            ),
+            **gradient_metrics,
+        }
+        metrics.update(self._tri_mode_bucket_metrics(output.diffusion_logits, block))
+        if include_visual_ablations:
+            metrics.update(
+                self._tri_mode_visual_ablation_metrics(
+                    images, input_ids, attention_mask, block, diffusion_loss
+                )
+            )
+        return loss, metrics
+
+    def _tri_mode_bucket_metrics(
+        self,
+        logits: torch.Tensor,
+        block: BlockCorruptionBatch,
+    ) -> dict[str, torch.Tensor]:
+        predictions = logits.argmax(dim=-1)
+        correct = predictions == block.targets
+        metrics: dict[str, torch.Tensor] = {}
+        for offset in range(block.prediction_mask.shape[1]):
+            active = block.prediction_mask[:, offset]
+            if active.any():
+                metrics[f"train/token_acc_diffusion_offset_{offset:02d}"] = (
+                    correct[:, offset][active].float().mean().detach()
+                )
+        ratio_buckets = {
+            "low": block.mask_ratios < 1.0 / 3.0,
+            "mid": (block.mask_ratios >= 1.0 / 3.0) & (block.mask_ratios < 2.0 / 3.0),
+            "high": block.mask_ratios >= 2.0 / 3.0,
+        }
+        for name, samples in ratio_buckets.items():
+            active = block.prediction_mask & samples.unsqueeze(1)
+            if active.any():
+                metrics[f"train/token_acc_diffusion_ratio_{name}"] = (
+                    correct[active].float().mean().detach()
+                )
+                metrics[f"train/masked_tokens_ratio_{name}"] = active.sum().float()
+        return metrics
+
+    def _weighted_gradient_diagnostic_metrics(
+        self,
+        metrics: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        ar_norm = metrics.get("diagnostic/grad_norm_ar_qwen")
+        diffusion_norm = metrics.get("diagnostic/grad_norm_diffusion_qwen")
+        if ar_norm is None or diffusion_norm is None:
+            return {}
+        weighted_ar = ar_norm * abs(self.ar_loss_weight)
+        weighted_diffusion = diffusion_norm * abs(self.diffusion_loss_weight)
+        return {
+            "diagnostic/weighted_grad_norm_ar_qwen": weighted_ar,
+            "diagnostic/weighted_grad_norm_diffusion_qwen": weighted_diffusion,
+            "diagnostic/weighted_grad_norm_ratio_diffusion_to_ar_qwen": (
+                weighted_diffusion / weighted_ar.clamp_min(1e-12)
+            ),
+        }
+
+    @torch.no_grad()
+    def _tri_mode_visual_ablation_metrics(
+        self,
+        images: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        block: BlockCorruptionBatch,
+        normal_loss: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        metrics = {"train/diffusion_loss_normal_block": normal_loss.detach()}
+        for ablation in self.validation_visual_ablations:
+            if ablation == "normal":
+                continue
+            visual_tokens = self.model.encode_images(self._ablate_images(images, ablation))
+            output = self.model.decode_dual_stream(
+                clean_input_ids=input_ids,
+                noisy_block_ids=block.noisy_ids,
+                block_starts=block.starts,
+                visual_tokens=visual_tokens,
+                clean_attention_mask=attention_mask,
+                noisy_block_mask=block.valid_mask,
+                timestep=block.timesteps,
+            )
+            ablated_loss = diffusion_denoising_loss(
+                output.diffusion_logits, block.targets, block.prediction_mask
+            )
+            metrics[f"train/diffusion_loss_{ablation}_block"] = ablated_loss
+            metrics[f"train/visual_ablation_delta_{ablation}_block"] = (
+                ablated_loss - normal_loss.detach()
+            )
+        return metrics
+
     def _should_measure_gradient_conflict(self) -> bool:
         step = int(self.global_step) + 1
         return (
-            self.mode == "joint"
+            self.mode in {"joint", "tri_mode_joint"}
             and self.gradient_diagnostic_interval > 0
             and step % self.gradient_diagnostic_interval == 0
             and self._last_gradient_diagnostic_step != int(self.global_step)
@@ -464,9 +668,13 @@ class OCRLightningModule(L.LightningModule):
         attention_mask: torch.Tensor | None,
     ) -> dict[str, torch.Tensor]:
         metrics: dict[str, torch.Tensor] = {}
-        if self.mode in {"ar", "joint"}:
+        if self.mode in {"ar", "joint", "tri_mode_joint"}:
             metrics.update(self._ar_ocr_metrics(images, input_ids, attention_mask))
-        if self.diffusion_schedule is not None and self.mask_token_id is not None:
+        if (
+            self.mode != "tri_mode_joint"
+            and self.diffusion_schedule is not None
+            and self.mask_token_id is not None
+        ):
             metrics.update(self._validation_diffusion_probe_metrics(images, input_ids, attention_mask))
         return metrics
 
@@ -652,6 +860,15 @@ class OCRLightningModule(L.LightningModule):
             and self.mask_token_id is not None
             and bool(self.probe_timesteps)
         )
+
+    def _validation_generator(
+        self,
+        batch_idx: int,
+        device: torch.device,
+    ) -> torch.Generator:
+        generator = torch.Generator(device=device)
+        generator.manual_seed(20_000 + int(self.global_step) * 100_003 + batch_idx)
+        return generator
 
     @torch.no_grad()
     def _diffusion_probe_metrics(

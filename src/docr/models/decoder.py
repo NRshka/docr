@@ -11,6 +11,12 @@ class DecoderOutput:
     logits: torch.Tensor
 
 
+@dataclass(frozen=True)
+class DualStreamDecoderOutput:
+    ar_logits: torch.Tensor
+    diffusion_logits: torch.Tensor
+
+
 class TinyTextDecoder(nn.Module):
     """Minimal decoder placeholder with AR and diffusion-compatible forward shape."""
 
@@ -203,6 +209,28 @@ class OCRModel(nn.Module):
             attention_mask=attention_mask,
             timestep=timestep,
             mode=mode,
+        )
+
+    def decode_dual_stream(
+        self,
+        clean_input_ids: torch.Tensor,
+        noisy_block_ids: torch.Tensor,
+        block_starts: torch.Tensor,
+        visual_tokens: torch.Tensor,
+        clean_attention_mask: torch.Tensor | None = None,
+        noisy_block_mask: torch.Tensor | None = None,
+        timestep: torch.Tensor | None = None,
+    ) -> DualStreamDecoderOutput:
+        if not hasattr(self.decoder, "forward_dual_stream"):
+            raise TypeError("decoder does not support asymmetric dual-stream training")
+        return self.decoder.forward_dual_stream(
+            clean_input_ids=clean_input_ids,
+            noisy_block_ids=noisy_block_ids,
+            block_starts=block_starts,
+            visual_tokens=visual_tokens,
+            clean_attention_mask=clean_attention_mask,
+            noisy_block_mask=noisy_block_mask,
+            timestep=timestep,
         )
 
     def forward(

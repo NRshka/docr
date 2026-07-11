@@ -6,7 +6,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from docr.models.decoder import DecoderOutput
+from docr.models.decoder import DecoderOutput, DualStreamDecoderOutput
 
 
 def build_unified_qwen_allowed_mask(
@@ -74,6 +74,61 @@ def allowed_mask_to_additive_attention_mask(
     additive = torch.zeros(expanded.shape, dtype=dtype, device=allowed_mask.device)
     additive = additive.masked_fill(~expanded, torch.finfo(dtype).min)
     return additive.unsqueeze(1)
+
+
+def build_dual_stream_allowed_mask(
+    num_visual_tokens: int,
+    clean_attention_mask: torch.Tensor,
+    block_starts: torch.Tensor,
+    noisy_block_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Build [batch, total, total] asymmetric clean/noisy attention permissions."""
+
+    if clean_attention_mask.ndim != 2 or noisy_block_mask.ndim != 2:
+        raise ValueError("clean and noisy masks must be [batch, sequence]")
+    batch_size, clean_length = clean_attention_mask.shape
+    if block_starts.shape != (batch_size,):
+        raise ValueError("block_starts must have shape [batch]")
+    if noisy_block_mask.shape[0] != batch_size:
+        raise ValueError("noisy block batch size must match clean stream")
+    block_length = noisy_block_mask.shape[1]
+    total = num_visual_tokens + clean_length + block_length
+    device = clean_attention_mask.device
+    allowed = torch.zeros((batch_size, total, total), dtype=torch.bool, device=device)
+    visual_end = num_visual_tokens
+    clean_start = visual_end
+    clean_end = clean_start + clean_length
+    noisy_start = clean_end
+
+    allowed[:, :visual_end, :visual_end] = True
+    clean_valid = clean_attention_mask.bool()
+    causal = torch.tril(torch.ones((clean_length, clean_length), dtype=torch.bool, device=device))
+    allowed[:, clean_start:clean_end, :visual_end] = True
+    allowed[:, clean_start:clean_end, clean_start:clean_end] = (
+        causal.unsqueeze(0) & clean_valid.unsqueeze(1)
+    )
+
+    allowed[:, noisy_start:, :visual_end] = True
+    clean_positions = torch.arange(clean_length, device=device).view(1, 1, clean_length)
+    prefix_keys = clean_positions < block_starts.view(batch_size, 1, 1)
+    prefix_keys &= clean_valid.view(batch_size, 1, clean_length)
+    allowed[:, noisy_start:, clean_start:clean_end] = prefix_keys.expand(
+        batch_size, block_length, clean_length
+    )
+    allowed[:, noisy_start:, noisy_start:] = noisy_block_mask.bool().unsqueeze(1).expand(
+        batch_size, block_length, block_length
+    )
+    return allowed
+
+
+def batched_allowed_mask_to_additive(
+    allowed_mask: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    if allowed_mask.ndim != 3:
+        raise ValueError("batched allowed mask must be [batch, query, key]")
+    additive = torch.zeros(allowed_mask.shape, dtype=dtype, device=allowed_mask.device)
+    return additive.masked_fill(~allowed_mask, torch.finfo(dtype).min).unsqueeze(1)
 
 
 class UnifiedQwenDecoder(nn.Module):
@@ -159,6 +214,76 @@ class UnifiedQwenDecoder(nn.Module):
             logits = self.lm.lm_head(hidden_states[:, prefix_len:, :])
         return DecoderOutput(logits=logits)
 
+    def forward_dual_stream(
+        self,
+        clean_input_ids: torch.Tensor,
+        noisy_block_ids: torch.Tensor,
+        block_starts: torch.Tensor,
+        visual_tokens: torch.Tensor,
+        clean_attention_mask: torch.Tensor | None = None,
+        noisy_block_mask: torch.Tensor | None = None,
+        timestep: torch.Tensor | None = None,
+    ) -> DualStreamDecoderOutput:
+        if clean_input_ids.ndim != 2 or noisy_block_ids.ndim != 2:
+            raise ValueError("clean and noisy ids must be [batch, sequence]")
+        batch_size, clean_length = clean_input_ids.shape
+        if noisy_block_ids.shape[0] != batch_size or visual_tokens.shape[0] != batch_size:
+            raise ValueError("dual-stream batch dimensions must match")
+        if clean_attention_mask is None:
+            clean_attention_mask = torch.ones_like(clean_input_ids, dtype=torch.bool)
+        else:
+            clean_attention_mask = clean_attention_mask.to(
+                device=clean_input_ids.device, dtype=torch.bool
+            )
+        if noisy_block_mask is None:
+            noisy_block_mask = torch.ones_like(noisy_block_ids, dtype=torch.bool)
+        else:
+            noisy_block_mask = noisy_block_mask.to(
+                device=noisy_block_ids.device, dtype=torch.bool
+            )
+
+        clean_embeds = self.lm.get_input_embeddings()(clean_input_ids)
+        noisy_embeds = self.lm.get_input_embeddings()(noisy_block_ids)
+        timestep = self._normalize_timestep(timestep, clean_input_ids)
+        noisy_embeds = noisy_embeds + self.timestep_embed(timestep).unsqueeze(1).to(
+            dtype=noisy_embeds.dtype
+        )
+        visual_embeds = self.visual_proj(visual_tokens).to(dtype=clean_embeds.dtype)
+        inputs_embeds = torch.cat([visual_embeds, clean_embeds, noisy_embeds], dim=1)
+        num_visual_tokens = visual_embeds.shape[1]
+        block_length = noisy_block_ids.shape[1]
+        allowed_mask = build_dual_stream_allowed_mask(
+            num_visual_tokens=num_visual_tokens,
+            clean_attention_mask=clean_attention_mask,
+            block_starts=block_starts.to(device=clean_input_ids.device, dtype=torch.long),
+            noisy_block_mask=noisy_block_mask,
+        )
+        attention_mask = batched_allowed_mask_to_additive(allowed_mask, inputs_embeds.dtype)
+
+        visual_positions = torch.arange(num_visual_tokens, device=clean_input_ids.device)
+        clean_positions = num_visual_tokens + torch.arange(
+            clean_length, device=clean_input_ids.device
+        )
+        noisy_offsets = torch.arange(block_length, device=clean_input_ids.device).unsqueeze(0)
+        noisy_positions = num_visual_tokens + block_starts.long().unsqueeze(1) + noisy_offsets
+        position_ids = torch.cat(
+            [
+                visual_positions.unsqueeze(0).expand(batch_size, -1),
+                clean_positions.unsqueeze(0).expand(batch_size, -1),
+                noisy_positions,
+            ],
+            dim=1,
+        )
+        hidden_states = self._forward_with_mask(inputs_embeds, attention_mask, position_ids)
+        clean_start = num_visual_tokens
+        noisy_start = clean_start + clean_length
+        ar_hidden = hidden_states[:, clean_start - 1 : noisy_start - 1, :]
+        noisy_hidden = hidden_states[:, noisy_start:, :]
+        return DualStreamDecoderOutput(
+            ar_logits=self.lm.lm_head(ar_hidden),
+            diffusion_logits=self.lm.lm_head(noisy_hidden),
+        )
+
     def _normalize_timestep(
         self,
         timestep: torch.Tensor | None,
@@ -179,7 +304,6 @@ class UnifiedQwenDecoder(nn.Module):
         mode: str,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = inputs_embeds.shape
-        model = self.lm.model
         position_ids = build_linear_position_ids(batch_size, seq_len, device=inputs_embeds.device)
         key_padding_mask = self._build_key_padding_mask(
             text_attention_mask=text_attention_mask,
@@ -202,6 +326,15 @@ class UnifiedQwenDecoder(nn.Module):
             key_padding_mask=key_padding_mask,
         )
 
+        return self._forward_with_mask(inputs_embeds, attention_mask, position_ids)
+
+    def _forward_with_mask(
+        self,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        model = self.lm.model
         hidden_states = inputs_embeds
         position_embeddings = model.rotary_emb(hidden_states, position_ids)
         layer_types = getattr(

@@ -1,0 +1,49 @@
+# @package _global_
+# D02: Nemotron-style Stage 2 from the trained D00 AR checkpoint.
+model:
+  name: decoder-d02-trimode-block16
+  decoder:
+    mode: joint
+  loss_weights:
+    ar: 1.0
+    diffusion: 0.3
+    refinement: 0.0
+
+train:
+  name: tri_mode_joint
+  # Override this with the D00 step-500 or last checkpoint path.
+  init_weights_from: null
+  init_weights_strict: true
+  resume_from_checkpoint: null
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-5
+  pretrained_learning_rate: 1.0e-5
+  weight_decay: 0.01
+  scheduler: cosine
+  warmup_steps: 0.1
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  float32_matmul_precision: high
+  precision: bf16
+  max_steps: 500
+  checkpoint_interval: 250
+  log_interval: 10
+  validate: true
+  val_batch_size: 2
+  val_check_interval_optimizer_steps: 250
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: 0
+  diffusion_block_length: 16
+  gradient_diagnostic_interval: 50
+  gradient_diagnostic_scope: qwen
+  probe_interval: 0
+  probe_timesteps: []
+  probe_visual_ablations: []
+  val_probe_timesteps: []
+  val_visual_ablations: [normal, blank, shuffled]
+
+output_dir: outputs/decoder/d02_trimode_block16
+logging:
+  run_name: decoder-d02-trimode-block16
+  tags: [decoder-study, d02, tri-mode, block-diffusion, dual-stream, frozen-vision]

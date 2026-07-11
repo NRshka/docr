@@ -12,6 +12,7 @@ import lightning as L
 import torch
 from omegaconf import DictConfig
 from omegaconf import OmegaConf
+from omegaconf import open_dict
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader
@@ -34,6 +35,36 @@ def lightning_precision(precision: str) -> str:
         "bf16": "bf16-mixed",
     }
     return mapping.get(str(precision), str(precision))
+
+
+def resolve_val_check_interval(train_cfg: DictConfig) -> int | float | None:
+    optimizer_steps = train_cfg.get("val_check_interval_optimizer_steps", None)
+    if optimizer_steps is None:
+        return train_cfg.get("val_check_interval", None)
+    optimizer_steps = int(optimizer_steps)
+    if optimizer_steps <= 0:
+        return None
+    return optimizer_steps * int(train_cfg.gradient_accumulation_steps)
+
+
+def load_model_weights_only(
+    model: torch.nn.Module,
+    checkpoint_path: str | Path,
+    strict: bool = True,
+) -> tuple[list[str], list[str]]:
+    checkpoint = torch.load(Path(checkpoint_path), map_location="cpu", weights_only=True)
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    if not isinstance(state_dict, dict):
+        raise TypeError("weights checkpoint must contain a state_dict mapping")
+    model_state = {
+        key.removeprefix("model."): value
+        for key, value in state_dict.items()
+        if key.startswith("model.")
+    }
+    if not model_state:
+        model_state = state_dict
+    incompatible = model.load_state_dict(model_state, strict=strict)
+    return list(incompatible.missing_keys), list(incompatible.unexpected_keys)
 
 
 def build_lightning_logger(cfg: DictConfig):
@@ -150,11 +181,23 @@ def main(cfg: DictConfig) -> None:
         if input_embeddings.num_embeddings != len(tokenizer):
             model.decoder.lm.resize_token_embeddings(len(tokenizer))
 
+    init_weights_from = cfg.train.get("init_weights_from", None)
+    if init_weights_from:
+        missing, unexpected = load_model_weights_only(
+            model,
+            checkpoint_path=str(init_weights_from),
+            strict=bool(cfg.train.get("init_weights_strict", True)),
+        )
+        print(
+            f"initialized_model_weights={init_weights_from} "
+            f"missing_keys={missing} unexpected_keys={unexpected}"
+        )
+
     diffusion_schedule = None
     mask_token_id = None
     special_token_ids = {pad_token_id}
     uses_diffusion = (
-        cfg.train.name in {"diffusion", "joint", "draft_refine"}
+        cfg.train.name in {"diffusion", "joint", "draft_refine", "tri_mode_joint"}
         or cfg.model.decoder.mode in {"diffusion", "joint"}
         or float(cfg.model.loss_weights.get("diffusion", 0.0)) > 0.0
     )
@@ -199,7 +242,12 @@ def main(cfg: DictConfig) -> None:
         log_to_logger=bool(cfg.logging.enabled),
         gradient_diagnostic_interval=int(cfg.train.get("gradient_diagnostic_interval", 0)),
         gradient_diagnostic_scope=str(cfg.train.get("gradient_diagnostic_scope", "qwen")),
+        diffusion_block_length=int(cfg.train.get("diffusion_block_length", 16)),
     )
+
+    resolved_val_check_interval = resolve_val_check_interval(cfg.train)
+    with open_dict(cfg.train):
+        cfg.train.resolved_val_check_interval = resolved_val_check_interval
 
     callbacks = []
     checkpoint_interval = int(cfg.train.get("checkpoint_interval", 0))
@@ -225,7 +273,7 @@ def main(cfg: DictConfig) -> None:
         gradient_clip_algorithm=str(cfg.train.get("gradient_clip_algorithm", "norm")),
         detect_anomaly=bool(cfg.train.get("detect_anomaly", False)),
         log_every_n_steps=int(cfg.train.log_interval),
-        val_check_interval=cfg.train.get("val_check_interval", None),
+        val_check_interval=resolved_val_check_interval,
         check_val_every_n_epoch=cfg.train.get("check_val_every_n_epoch", 1),
         num_sanity_val_steps=int(cfg.train.get("num_sanity_val_steps", 0)),
         logger=build_lightning_logger(cfg),
@@ -233,7 +281,12 @@ def main(cfg: DictConfig) -> None:
         enable_checkpointing=bool(callbacks),
         default_root_dir=str(cfg.output_dir),
     )
-    trainer.fit(lightning_module, train_dataloaders=loader, val_dataloaders=val_loader)
+    trainer.fit(
+        lightning_module,
+        train_dataloaders=loader,
+        val_dataloaders=val_loader,
+        ckpt_path=cfg.train.get("resume_from_checkpoint", None),
+    )
     print(f"completed_steps={trainer.global_step}")
 
 
