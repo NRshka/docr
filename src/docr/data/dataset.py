@@ -16,12 +16,37 @@ from docr.data.transforms import build_image_transform, load_rgb_image
 class TokenizerLike(Protocol):
     def encode(self, text: str, add_special_tokens: bool = True) -> list[int]: ...
 
+    eos_token_id: int | None
+
 
 def encode_text_fallback(text: str, max_text_length: int | None = None) -> list[int]:
     ids = list(text.encode("utf-8"))
     if max_text_length is not None:
         ids = ids[:max_text_length]
     return ids
+
+
+def encode_text_with_eos(
+    text: str,
+    tokenizer: TokenizerLike,
+    max_text_length: int | None = None,
+) -> list[int]:
+    """Encode a supervised target and guarantee exactly one terminal EOS token."""
+
+    eos_token_id = tokenizer.eos_token_id
+    if eos_token_id is None:
+        raise ValueError("tokenizer must define eos_token_id for supervised OCR targets")
+    if max_text_length is not None and max_text_length <= 0:
+        raise ValueError("max_text_length must be positive so an EOS token can be retained")
+
+    # Do not depend on model-specific `add_special_tokens` templates: Qwen tokenizers do not
+    # necessarily append EOS. Remove any trailing EOS before adding the one supervised terminator.
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    while ids and ids[-1] == eos_token_id:
+        ids.pop()
+    if max_text_length is not None:
+        ids = ids[: max_text_length - 1]
+    return [*ids, eos_token_id]
 
 
 class ManifestOCRDataset(Dataset[dict]):
@@ -72,7 +97,7 @@ class ManifestOCRDataset(Dataset[dict]):
         if self.tokenizer is None:
             ids = encode_text_fallback(text)
         else:
-            ids = self.tokenizer.encode(text, add_special_tokens=True)
+            return encode_text_with_eos(text, self.tokenizer, self.max_text_length)
         if self.max_text_length is not None:
             ids = ids[: self.max_text_length]
         return ids
@@ -188,10 +213,7 @@ class HFCordV2OCRDataset(Dataset[dict]):
     def _encode_text(self, text: str) -> list[int]:
         if self.tokenizer is None:
             return encode_text_fallback(text, self.max_text_length)
-        ids = self.tokenizer.encode(text, add_special_tokens=True)
-        if self.max_text_length is not None:
-            ids = ids[: self.max_text_length]
-        return ids
+        return encode_text_with_eos(text, self.tokenizer, self.max_text_length)
 
 
 def cord_ground_truth_to_text(ground_truth: str, target_mode: str = "line_text") -> str:
