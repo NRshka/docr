@@ -1,0 +1,18 @@
+# @package _global_
+# D03: correctness-first, uncached Phase-4 evaluation of the completed D02 checkpoint.
+model:
+  name: decoder-d03-phase4-self-speculation
+
+data:
+  target_mode: raw_json
+
+phase4:
+  draft_widths: [4, 8, 16, 32]
+  max_new_tokens: 1024
+  max_samples: 8
+  output_path: outputs/decoder/d03_phase4_self_speculation/results.json
+
+logging:
+  enabled: false
+
+output_dir: outputs/decoder/d03_phase4_self_speculation
