@@ -116,13 +116,16 @@ def main(cfg: DictConfig) -> None:
         if device.type == "cuda":
             torch.cuda.synchronize()
         started = time.perf_counter()
-        baseline = greedy_ar_decode(
-            model,
-            image,
-            query_token_id=query_token_id,
-            max_new_tokens=int(cfg.phase4.max_new_tokens),
-            eos_token_id=eos_token_id,
-        )
+        with torch.autocast(
+            device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"
+        ):
+            baseline = greedy_ar_decode(
+                model,
+                image,
+                query_token_id=query_token_id,
+                max_new_tokens=int(cfg.phase4.max_new_tokens),
+                eos_token_id=eos_token_id,
+            )
         if device.type == "cuda":
             torch.cuda.synchronize()
         ar_seconds = time.perf_counter() - started
@@ -143,16 +146,19 @@ def main(cfg: DictConfig) -> None:
             if device.type == "cuda":
                 torch.cuda.synchronize()
             started = time.perf_counter()
-            result = linear_self_speculative_decode(
-                model,
-                image,
-                mask_token_id=int(mask_token_id),
-                query_token_id=query_token_id,
-                diffusion_timestep=int(cfg.model.diffusion.timesteps) - 1,
-                draft_width=width,
-                max_new_tokens=int(cfg.phase4.max_new_tokens),
-                eos_token_id=eos_token_id,
-            )
+            with torch.autocast(
+                device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"
+            ):
+                result = linear_self_speculative_decode(
+                    model,
+                    image,
+                    mask_token_id=int(mask_token_id),
+                    query_token_id=query_token_id,
+                    diffusion_timestep=int(cfg.model.diffusion.timesteps) - 1,
+                    draft_width=width,
+                    max_new_tokens=int(cfg.phase4.max_new_tokens),
+                    eos_token_id=eos_token_id,
+                )
             if device.type == "cuda":
                 torch.cuda.synchronize()
             seconds = time.perf_counter() - started

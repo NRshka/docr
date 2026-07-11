@@ -161,7 +161,9 @@ class QwenVisualPrefixDecoder(nn.Module):
             text_embeds = text_embeds + self.timestep_embed(timestep.long()).unsqueeze(1).to(
                 dtype=text_embeds.dtype
             )
-        visual_embeds = self.visual_proj(visual_tokens).to(dtype=text_embeds.dtype)
+        visual_embeds = self.visual_proj(
+            visual_tokens.to(dtype=self.visual_proj.weight.dtype)
+        ).to(dtype=text_embeds.dtype)
         inputs_embeds = torch.cat([visual_embeds, text_embeds], dim=1)
 
         prefix_mask = torch.ones(

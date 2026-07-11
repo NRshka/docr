@@ -70,7 +70,8 @@ def test_unified_qwen_ar_and_diffusion_forward_shapes():
         canvas_length=3,
         config=tiny_qwen_config(),
     )
-    visual_tokens = torch.randn(2, 3, 16)
+    # CogViT may emit bf16 even when the Qwen projection is stored in fp32.
+    visual_tokens = torch.randn(2, 3, 16, dtype=torch.bfloat16)
     input_ids = torch.tensor([[1, 2, 3, 4, 0, 0], [5, 6, 7, 8, 9, 10]])
     attention_mask = torch.tensor(
         [[True, True, True, True, False, False], [True, True, True, True, True, True]]

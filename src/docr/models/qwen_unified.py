@@ -197,7 +197,9 @@ class UnifiedQwenDecoder(nn.Module):
                 dtype=text_embeds.dtype
             )
 
-        visual_embeds = self.visual_proj(visual_tokens).to(dtype=text_embeds.dtype)
+        visual_embeds = self.visual_proj(
+            visual_tokens.to(dtype=self.visual_proj.weight.dtype)
+        ).to(dtype=text_embeds.dtype)
         inputs_embeds = torch.cat([visual_embeds, text_embeds], dim=1)
         hidden_states = self._forward_model(
             inputs_embeds=inputs_embeds,
@@ -248,7 +250,9 @@ class UnifiedQwenDecoder(nn.Module):
         noisy_embeds = noisy_embeds + self.timestep_embed(timestep).unsqueeze(1).to(
             dtype=noisy_embeds.dtype
         )
-        visual_embeds = self.visual_proj(visual_tokens).to(dtype=clean_embeds.dtype)
+        visual_embeds = self.visual_proj(
+            visual_tokens.to(dtype=self.visual_proj.weight.dtype)
+        ).to(dtype=clean_embeds.dtype)
         inputs_embeds = torch.cat([visual_embeds, clean_embeds, noisy_embeds], dim=1)
         num_visual_tokens = visual_embeds.shape[1]
         block_length = noisy_block_ids.shape[1]
