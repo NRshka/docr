@@ -1,0 +1,44 @@
+# @package _global_
+# Decoder D00: strict AR-only control for V11's frozen CogViT representation.
+model:
+  name: decoder-d00-cogvit-ar-only
+  decoder:
+    mode: ar
+  loss_weights:
+    ar: 1.0
+    diffusion: 0.0
+    refinement: 0.0
+
+train:
+  name: ar
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-5
+  pretrained_learning_rate: 1.0e-5
+  weight_decay: 0.01
+  scheduler: cosine
+  warmup_steps: 0.1
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  float32_matmul_precision: high
+  precision: bf16
+  max_steps: 500
+  checkpoint_interval: 250
+  log_interval: 10
+  validate: true
+  val_batch_size: 2
+  # Lightning counts this interval in train batches, not optimizer steps. With
+  # accumulation=4, 1000 train batches correspond to 250 optimizer steps.
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: 0
+  probe_interval: 0
+  probe_timesteps: []
+  probe_visual_ablations: []
+  val_probe_timesteps: []
+  val_visual_ablations: []
+
+output_dir: outputs/decoder/d00_cogvit_ar_only
+logging:
+  run_name: decoder-d00-cogvit-ar-only
+  tags: [decoder-study, d00, ar-only, cogvit, frozen-vision, no-diffusion]
