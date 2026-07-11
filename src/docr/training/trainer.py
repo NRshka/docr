@@ -35,6 +35,8 @@ class OCRLightningModule(L.LightningModule):
         validation_probe_timesteps: list[int] | None = None,
         validation_visual_ablations: list[str] | None = None,
         log_to_logger: bool = True,
+        gradient_diagnostic_interval: int = 0,
+        gradient_diagnostic_scope: str = "qwen",
     ) -> None:
         super().__init__()
         self.model = model
@@ -59,6 +61,9 @@ class OCRLightningModule(L.LightningModule):
         self.validation_probe_timesteps = validation_probe_timesteps or []
         self.validation_visual_ablations = validation_visual_ablations or []
         self.log_to_logger = log_to_logger
+        self.gradient_diagnostic_interval = gradient_diagnostic_interval
+        self.gradient_diagnostic_scope = gradient_diagnostic_scope
+        self._last_gradient_diagnostic_step = -1
         self.last_metrics: dict[str, float] = {}
         self.last_val_metrics: dict[str, float] = {}
         self.last_batch_diagnostics = "unavailable"
@@ -111,7 +116,12 @@ class OCRLightningModule(L.LightningModule):
             f"doc_ids={batch.get('doc_ids', [])}"
         )
         if self.mode == "joint":
-            loss, metrics = self._joint_step(images, input_ids, attention_mask)
+            loss, metrics = self._joint_step(
+                images,
+                input_ids,
+                attention_mask,
+                include_gradient_diagnostics=self._should_measure_gradient_conflict(),
+            )
         elif self.mode == "diffusion":
             loss, metrics = self._diffusion_step(images, input_ids, attention_mask)
         else:
@@ -292,6 +302,7 @@ class OCRLightningModule(L.LightningModule):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None,
         include_probes: bool = True,
+        include_gradient_diagnostics: bool = False,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         visual_tokens = self.model.encode_images(images)
         ar_loss, ar_metrics = self._ar_step(
@@ -309,6 +320,10 @@ class OCRLightningModule(L.LightningModule):
         )
         weighted_ar = self.ar_loss_weight * ar_loss
         weighted_diffusion = self.diffusion_loss_weight * diffusion_loss
+        gradient_metrics = {}
+        if include_gradient_diagnostics:
+            gradient_metrics = self._gradient_conflict_metrics(ar_loss, diffusion_loss)
+            self._last_gradient_diagnostic_step = int(self.global_step)
         loss = weighted_ar + weighted_diffusion
         metrics = {**diffusion_metrics}
         metrics.update(
@@ -332,7 +347,93 @@ class OCRLightningModule(L.LightningModule):
         )
         if include_probes and self._should_probe():
             metrics.update(self._diffusion_probe_metrics(images, input_ids, attention_mask, visual_tokens))
+        metrics.update(gradient_metrics)
         return loss, metrics
+
+    def _should_measure_gradient_conflict(self) -> bool:
+        step = int(self.global_step) + 1
+        return (
+            self.mode == "joint"
+            and self.gradient_diagnostic_interval > 0
+            and step % self.gradient_diagnostic_interval == 0
+            and self._last_gradient_diagnostic_step != int(self.global_step)
+        )
+
+    def _gradient_diagnostic_parameters(self) -> list[torch.nn.Parameter]:
+        if self.gradient_diagnostic_scope == "qwen":
+            decoder = getattr(self.model, "decoder", None)
+            lm = getattr(decoder, "lm", None)
+            if lm is None:
+                return []
+            return [parameter for parameter in lm.parameters() if parameter.requires_grad]
+        if self.gradient_diagnostic_scope == "all_trainable":
+            return [parameter for parameter in self.model.parameters() if parameter.requires_grad]
+        raise ValueError(
+            f"Unknown gradient diagnostic scope: {self.gradient_diagnostic_scope}"
+        )
+
+    def _gradient_conflict_metrics(
+        self,
+        ar_loss: torch.Tensor,
+        diffusion_loss: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        parameters = self._gradient_diagnostic_parameters()
+        if not parameters:
+            return {}
+
+        ar_gradients = torch.autograd.grad(
+            ar_loss,
+            parameters,
+            retain_graph=True,
+            create_graph=False,
+            allow_unused=True,
+        )
+        diffusion_gradients = torch.autograd.grad(
+            diffusion_loss,
+            parameters,
+            retain_graph=True,
+            create_graph=False,
+            allow_unused=True,
+        )
+
+        device = ar_loss.device
+        ar_norm_sq = torch.zeros((), device=device, dtype=torch.float32)
+        diffusion_norm_sq = torch.zeros((), device=device, dtype=torch.float32)
+        dot_product = torch.zeros((), device=device, dtype=torch.float32)
+        active_tensors = 0
+        for ar_gradient, diffusion_gradient in zip(ar_gradients, diffusion_gradients):
+            if ar_gradient is not None:
+                ar_float = ar_gradient.detach().float()
+                ar_norm_sq += torch.sum(ar_float * ar_float)
+            else:
+                ar_float = None
+            if diffusion_gradient is not None:
+                diffusion_float = diffusion_gradient.detach().float()
+                diffusion_norm_sq += torch.sum(diffusion_float * diffusion_float)
+            else:
+                diffusion_float = None
+            if ar_float is not None and diffusion_float is not None:
+                dot_product += torch.sum(ar_float * diffusion_float)
+                active_tensors += 1
+
+        ar_norm = ar_norm_sq.sqrt()
+        diffusion_norm = diffusion_norm_sq.sqrt()
+        denominator = (ar_norm * diffusion_norm).clamp_min(1e-12)
+        cosine = (dot_product / denominator).clamp(-1.0, 1.0)
+        ratio = diffusion_norm / ar_norm.clamp_min(1e-12)
+        self._require_finite(ar_norm, "AR diagnostic gradient norm")
+        self._require_finite(diffusion_norm, "diffusion diagnostic gradient norm")
+        self._require_finite(cosine, "AR/diffusion gradient cosine")
+        return {
+            "diagnostic/grad_norm_ar_qwen": ar_norm,
+            "diagnostic/grad_norm_diffusion_qwen": diffusion_norm,
+            "diagnostic/grad_norm_ratio_diffusion_to_ar_qwen": ratio,
+            "diagnostic/grad_cosine_ar_diffusion_qwen": cosine,
+            "diagnostic/grad_conflict_qwen": (cosine < 0).float(),
+            "diagnostic/active_gradient_tensors_qwen": torch.tensor(
+                float(active_tensors), device=device
+            ),
+        }
 
     def _base_metrics(
         self,

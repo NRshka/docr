@@ -49,3 +49,35 @@ def test_joint_training_step_logs_ar_and_diffusion_losses():
     assert "train/diffusion_timestep" in metrics
     assert "train/masked_token_fraction" in metrics
     assert "probe/normal_loss_t01" in metrics
+
+
+def test_joint_gradient_diagnostics_measure_conflicting_objectives():
+    vision = TinyVisionEncoder(
+        patch_size=8,
+        hidden_size=16,
+        output_tokens=3,
+        compressor_layers=1,
+        compressor_heads=4,
+    )
+    decoder = TinyTextDecoder(vocab_size=32, hidden_size=16)
+    module = OCRLightningModule(
+        model=OCRModel(vision, decoder),
+        mode="joint",
+        gradient_diagnostic_interval=1,
+        gradient_diagnostic_scope="all_trainable",
+    )
+    parameter = next(module.model.parameters())
+    positive_loss = parameter.square().sum()
+    negative_loss = -parameter.square().sum()
+
+    metrics = module._gradient_conflict_metrics(positive_loss, negative_loss)
+
+    assert torch.allclose(
+        metrics["diagnostic/grad_cosine_ar_diffusion_qwen"],
+        torch.tensor(-1.0),
+    )
+    assert metrics["diagnostic/grad_conflict_qwen"] == 1
+    assert torch.allclose(
+        metrics["diagnostic/grad_norm_ratio_diffusion_to_ar_qwen"],
+        torch.tensor(1.0),
+    )

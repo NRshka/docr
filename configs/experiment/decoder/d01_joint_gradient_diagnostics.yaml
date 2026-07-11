@@ -1,0 +1,46 @@
+# @package _global_
+# Decoder D01: reproduce V11 joint training and measure AR/diffusion gradient conflict.
+model:
+  name: decoder-d01-joint-gradient-diagnostics
+  decoder:
+    mode: joint
+  loss_weights:
+    ar: 1.0
+    diffusion: 1.0
+    refinement: 0.0
+
+train:
+  name: joint
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-5
+  pretrained_learning_rate: 1.0e-5
+  weight_decay: 0.01
+  scheduler: cosine
+  warmup_steps: 0.1
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  float32_matmul_precision: high
+  precision: bf16
+  max_steps: 500
+  checkpoint_interval: 250
+  log_interval: 10
+  validate: true
+  val_batch_size: 2
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: 0
+  # Two additional read-only autograd passes every 25 optimizer steps.
+  gradient_diagnostic_interval: 25
+  gradient_diagnostic_scope: qwen
+  # Disable single-batch training probes; retain averaged validation grounding probes.
+  probe_interval: 0
+  probe_timesteps: []
+  probe_visual_ablations: []
+  val_probe_timesteps: [1, 8, 16, 31]
+  val_visual_ablations: [normal, blank, shuffled]
+
+output_dir: outputs/decoder/d01_joint_gradient_diagnostics
+logging:
+  run_name: decoder-d01-joint-gradient-diagnostics
+  tags: [decoder-study, d01, joint, gradient-conflict, cogvit, frozen-vision]

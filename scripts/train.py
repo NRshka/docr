@@ -197,6 +197,8 @@ def main(cfg: DictConfig) -> None:
             cfg.train.get("val_visual_ablations", cfg.train.get("probe_visual_ablations", []))
         ),
         log_to_logger=bool(cfg.logging.enabled),
+        gradient_diagnostic_interval=int(cfg.train.get("gradient_diagnostic_interval", 0)),
+        gradient_diagnostic_scope=str(cfg.train.get("gradient_diagnostic_scope", "qwen")),
     )
 
     callbacks = []
