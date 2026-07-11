@@ -11,7 +11,8 @@ model:
 
 train:
   name: tri_mode_joint
-  # Override this with the D00 step-500 or last checkpoint path.
+  # Override this with a trusted, locally produced D00 Lightning checkpoint. Loading Lightning's
+  # complete archive requires weights_only=False before the model state_dict can be extracted.
   init_weights_from: null
   init_weights_strict: true
   resume_from_checkpoint: null

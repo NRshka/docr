@@ -28,6 +28,7 @@ def test_weights_only_initialization_strips_lightning_model_prefix(tmp_path: Pat
         "state_dict": {f"model.{name}": value for name, value in source.state_dict().items()},
         "global_step": 500,
         "optimizer_states": [{"ignored": True}],
+        "hyper_parameters": OmegaConf.create({"mode": "ar", "nested": {"value": 3}}),
     }
     path = tmp_path / "stage1.ckpt"
     torch.save(checkpoint, path)

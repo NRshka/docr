@@ -52,7 +52,10 @@ def load_model_weights_only(
     checkpoint_path: str | Path,
     strict: bool = True,
 ) -> tuple[list[str], list[str]]:
-    checkpoint = torch.load(Path(checkpoint_path), map_location="cpu", weights_only=True)
+    # Lightning checkpoints contain loop, callback, optimizer, and hyperparameter metadata that
+    # PyTorch's restricted weights-only unpickler may reject before we can extract `state_dict`.
+    # This feature is therefore for trusted, locally produced Lightning checkpoints only.
+    checkpoint = torch.load(Path(checkpoint_path), map_location="cpu", weights_only=False)
     state_dict = checkpoint.get("state_dict", checkpoint)
     if not isinstance(state_dict, dict):
         raise TypeError("weights checkpoint must contain a state_dict mapping")
