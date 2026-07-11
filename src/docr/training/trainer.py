@@ -13,6 +13,7 @@ from docr.models.diffusion import (
     corrupt_contiguous_blocks,
     corrupt_with_mask,
 )
+from docr.training.ar_corruption import corrupt_ar_context
 from docr.training.losses import diffusion_denoising_loss, language_model_loss
 from docr.training.schedules import build_scheduler
 
@@ -43,6 +44,8 @@ class OCRLightningModule(L.LightningModule):
         gradient_diagnostic_interval: int = 0,
         gradient_diagnostic_scope: str = "qwen",
         diffusion_block_length: int = 16,
+        ar_context_corruption_probability: float = 0.0,
+        ar_robust_loss_weight: float = 0.0,
     ) -> None:
         super().__init__()
         self.model = model
@@ -70,6 +73,8 @@ class OCRLightningModule(L.LightningModule):
         self.gradient_diagnostic_interval = gradient_diagnostic_interval
         self.gradient_diagnostic_scope = gradient_diagnostic_scope
         self.diffusion_block_length = diffusion_block_length
+        self.ar_context_corruption_probability = ar_context_corruption_probability
+        self.ar_robust_loss_weight = ar_robust_loss_weight
         self._last_gradient_diagnostic_step = -1
         self.last_metrics: dict[str, float] = {}
         self.last_val_metrics: dict[str, float] = {}
@@ -122,7 +127,9 @@ class OCRLightningModule(L.LightningModule):
             f"text_shape={tuple(input_ids.shape)} valid_lengths={valid_lengths} "
             f"doc_ids={batch.get('doc_ids', [])}"
         )
-        if self.mode == "tri_mode_joint":
+        if self.mode == "ar_robust":
+            loss, metrics = self._robust_ar_step(images, input_ids, attention_mask)
+        elif self.mode == "tri_mode_joint":
             loss, metrics = self._tri_mode_step(
                 images,
                 input_ids,
@@ -242,6 +249,54 @@ class OCRLightningModule(L.LightningModule):
         metrics = self._base_metrics(loss, images=images, labels=labels)
         metrics["train/loss_ar"] = loss.detach()
         metrics["train/token_acc_ar"] = self._token_accuracy(output.logits, labels)
+        return loss, metrics
+
+    def _robust_ar_step(
+        self,
+        images: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        generator: torch.Generator | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if self.mask_token_id is None:
+            raise ValueError("robust AR training requires a mask token")
+        visual_tokens = self.model.encode_images(images)
+        clean_loss, clean_metrics = self._ar_step(
+            images, input_ids, attention_mask, visual_tokens=visual_tokens
+        )
+        corruption = corrupt_ar_context(
+            input_ids,
+            attention_mask,
+            mask_token_id=self.mask_token_id,
+            probability=self.ar_context_corruption_probability,
+            special_token_ids=self.special_token_ids,
+            generator=generator,
+        )
+        output = self.model.decode_text(
+            input_ids=corruption.input_ids,
+            visual_tokens=visual_tokens,
+            attention_mask=attention_mask,
+            mode="ar",
+        )
+        labels = input_ids.clone()
+        if attention_mask is not None:
+            labels = labels.masked_fill(~attention_mask.bool(), -100)
+        robust_loss = language_model_loss(output.logits, labels, ignore_index=-100)
+        loss = clean_loss + self.ar_robust_loss_weight * robust_loss
+        eligible_count = corruption.eligible_mask.sum().clamp_min(1)
+        metrics = {
+            **clean_metrics,
+            "train/loss": loss.detach(),
+            "train/loss_ar_clean": clean_loss.detach(),
+            "train/loss_ar_robust": robust_loss.detach(),
+            "train/loss_ar_robust_weighted": (
+                self.ar_robust_loss_weight * robust_loss
+            ).detach(),
+            "train/ar_context_corruption_fraction": (
+                corruption.corruption_mask.sum().float() / eligible_count.float()
+            ).detach(),
+            "train/ar_context_eligible_tokens": eligible_count.float().detach(),
+        }
         return loss, metrics
 
     def _diffusion_step(
@@ -668,7 +723,7 @@ class OCRLightningModule(L.LightningModule):
         attention_mask: torch.Tensor | None,
     ) -> dict[str, torch.Tensor]:
         metrics: dict[str, torch.Tensor] = {}
-        if self.mode in {"ar", "joint", "tri_mode_joint"}:
+        if self.mode in {"ar", "ar_robust", "joint", "tri_mode_joint"}:
             metrics.update(self._ar_ocr_metrics(images, input_ids, attention_mask))
         if (
             self.mode != "tri_mode_joint"

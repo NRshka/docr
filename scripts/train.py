@@ -198,9 +198,10 @@ def main(cfg: DictConfig) -> None:
 
     diffusion_schedule = None
     mask_token_id = None
-    special_token_ids = {pad_token_id}
+    special_token_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
+    special_token_ids.add(pad_token_id)
     uses_diffusion = (
-        cfg.train.name in {"diffusion", "joint", "draft_refine", "tri_mode_joint"}
+        cfg.train.name in {"diffusion", "joint", "draft_refine", "tri_mode_joint", "ar_robust"}
         or cfg.model.decoder.mode in {"diffusion", "joint"}
         or float(cfg.model.loss_weights.get("diffusion", 0.0)) > 0.0
     )
@@ -246,6 +247,10 @@ def main(cfg: DictConfig) -> None:
         gradient_diagnostic_interval=int(cfg.train.get("gradient_diagnostic_interval", 0)),
         gradient_diagnostic_scope=str(cfg.train.get("gradient_diagnostic_scope", "qwen")),
         diffusion_block_length=int(cfg.train.get("diffusion_block_length", 16)),
+        ar_context_corruption_probability=float(
+            cfg.train.get("ar_context_corruption_probability", 0.0)
+        ),
+        ar_robust_loss_weight=float(cfg.train.get("ar_robust_loss_weight", 0.0)),
     )
 
     resolved_val_check_interval = resolve_val_check_interval(cfg.train)
