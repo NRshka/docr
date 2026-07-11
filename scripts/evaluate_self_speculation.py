@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from docr.data.collate import OCRCollator
 from docr.data.dataset import HFCordV2OCRDataset, ManifestOCRDataset
 from docr.evaluation.metrics import ocr_metrics
+from docr.evaluation.generation import generation_length_metrics
 from docr.inference.self_speculative import greedy_ar_decode, linear_self_speculative_decode
 from docr.models.factory import build_model
 from docr.utils.tokenizer import build_tokenizer, tokenizer_pad_id
@@ -131,14 +132,30 @@ def main(cfg: DictConfig) -> None:
         ar_seconds = time.perf_counter() - started
         ar_text = decode_text(tokenizer, baseline.token_ids)
         ar_scores = ocr_metrics(ar_text, target)
+        target_ids = batch["input_ids"][0, batch["attention_mask"][0].bool()].tolist()
+        ar_generation = generation_length_metrics(
+            baseline.token_ids[0].tolist(),
+            target_ids,
+            eos_token_id=eos_token_id,
+            max_new_tokens=int(cfg.phase4.max_new_tokens),
+        )
         for name, value in ar_scores.items():
+            add_metric(f"ar/{name}", value)
+        for name, value in ar_generation.items():
             add_metric(f"ar/{name}", value)
         add_metric("ar/json_valid", valid_json(ar_text))
         add_metric("ar/seconds", ar_seconds)
         record: dict[str, Any] = {
             "sample": sample_index,
             "target": target,
-            "ar": {"text": ar_text, "seconds": ar_seconds, **ar_scores},
+            "ar": {
+                "text": ar_text,
+                "target_token_ids": target_ids,
+                "generated_token_ids": baseline.token_ids[0].tolist(),
+                "seconds": ar_seconds,
+                **ar_scores,
+                **ar_generation,
+            },
             "self_speculative": {},
         }
 
