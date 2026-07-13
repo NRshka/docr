@@ -131,6 +131,35 @@ def batched_allowed_mask_to_additive(
     return additive.masked_fill(~allowed_mask, torch.finfo(dtype).min).unsqueeze(1)
 
 
+class GatedVisualCrossAttention(nn.Module):
+    """Pre-norm visual cross-attention with an exactly closed initial residual gate."""
+
+    def __init__(self, hidden_size: int, num_heads: int) -> None:
+        super().__init__()
+        if hidden_size % num_heads != 0:
+            raise ValueError("hidden_size must be divisible by cross-attention heads")
+        self.query_norm = nn.LayerNorm(hidden_size)
+        self.visual_norm = nn.LayerNorm(hidden_size)
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_size,
+            num_heads=num_heads,
+            dropout=0.0,
+            batch_first=True,
+        )
+        self.gate = nn.Parameter(torch.zeros(()))
+
+    def forward(self, hidden_states: torch.Tensor, visual_states: torch.Tensor) -> torch.Tensor:
+        query = self.query_norm(hidden_states)
+        memory = self.visual_norm(visual_states)
+        attended, _ = self.attention(
+            query=query,
+            key=memory,
+            value=memory,
+            need_weights=False,
+        )
+        return hidden_states + torch.tanh(self.gate).to(dtype=attended.dtype) * attended
+
+
 class UnifiedQwenDecoder(nn.Module):
     """Qwen decoder with explicit AR and diffusion attention masks.
 
@@ -150,6 +179,8 @@ class UnifiedQwenDecoder(nn.Module):
         local_files_only: bool = False,
         trust_remote_code: bool = False,
         sdpa_backend: str = "safe",
+        cross_attention_layers: list[int] | None = None,
+        cross_attention_heads: int = 8,
         config: Any | None = None,
     ) -> None:
         super().__init__()
@@ -172,6 +203,15 @@ class UnifiedQwenDecoder(nn.Module):
         self.num_canvases = num_canvases
         self.canvas_length = canvas_length
         self.sdpa_backend = sdpa_backend
+        self.cross_attention_layer_indices = self._resolve_cross_attention_layers(
+            cross_attention_layers or [], int(self.lm.config.num_hidden_layers)
+        )
+        self.cross_attention = nn.ModuleDict(
+            {
+                str(layer_idx): GatedVisualCrossAttention(hidden_size, cross_attention_heads)
+                for layer_idx in self.cross_attention_layer_indices
+            }
+        )
 
         if freeze_lm:
             for parameter in self.lm.parameters():
@@ -207,6 +247,7 @@ class UnifiedQwenDecoder(nn.Module):
             num_visual_tokens=visual_embeds.shape[1],
             text_length=input_ids.shape[1],
             mode=mode,
+            visual_states=visual_embeds,
         )
 
         prefix_len = visual_embeds.shape[1]
@@ -278,7 +319,13 @@ class UnifiedQwenDecoder(nn.Module):
             ],
             dim=1,
         )
-        hidden_states = self._forward_with_mask(inputs_embeds, attention_mask, position_ids)
+        hidden_states = self._forward_with_mask(
+            inputs_embeds,
+            attention_mask,
+            position_ids,
+            visual_states=visual_embeds,
+            num_visual_tokens=num_visual_tokens,
+        )
         clean_start = num_visual_tokens
         noisy_start = clean_start + clean_length
         ar_hidden = hidden_states[:, clean_start - 1 : noisy_start - 1, :]
@@ -306,6 +353,7 @@ class UnifiedQwenDecoder(nn.Module):
         num_visual_tokens: int,
         text_length: int,
         mode: str,
+        visual_states: torch.Tensor,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = inputs_embeds.shape
         position_ids = build_linear_position_ids(batch_size, seq_len, device=inputs_embeds.device)
@@ -330,13 +378,21 @@ class UnifiedQwenDecoder(nn.Module):
             key_padding_mask=key_padding_mask,
         )
 
-        return self._forward_with_mask(inputs_embeds, attention_mask, position_ids)
+        return self._forward_with_mask(
+            inputs_embeds,
+            attention_mask,
+            position_ids,
+            visual_states=visual_states,
+            num_visual_tokens=num_visual_tokens,
+        )
 
     def _forward_with_mask(
         self,
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
         position_ids: torch.Tensor,
+        visual_states: torch.Tensor,
+        num_visual_tokens: int,
     ) -> torch.Tensor:
         model = self.lm.model
         hidden_states = inputs_embeds
@@ -358,8 +414,33 @@ class UnifiedQwenDecoder(nn.Module):
                     past_key_values=None,
                     use_cache=False,
                 )
+                layer_key = str(layer_idx)
+                if layer_key in self.cross_attention:
+                    cross_attention = self.cross_attention[layer_key]
+                    text_states = cross_attention(
+                        hidden_states[:, num_visual_tokens:, :], visual_states
+                    )
+                    hidden_states = torch.cat(
+                        [hidden_states[:, :num_visual_tokens, :], text_states], dim=1
+                    )
 
         return model.norm(hidden_states)
+
+    @staticmethod
+    def _resolve_cross_attention_layers(
+        configured_layers: list[int], num_hidden_layers: int
+    ) -> tuple[int, ...]:
+        resolved = []
+        for layer_idx in configured_layers:
+            normalized = layer_idx if layer_idx >= 0 else num_hidden_layers + layer_idx
+            if not 0 <= normalized < num_hidden_layers:
+                raise ValueError(
+                    f"cross-attention layer {layer_idx} is outside a {num_hidden_layers}-layer model"
+                )
+            resolved.append(normalized)
+        if len(set(resolved)) != len(resolved):
+            raise ValueError("cross-attention layers must be unique")
+        return tuple(sorted(resolved))
 
     def _sdpa_kernel_context(self, device: torch.device):
         if device.type != "cuda" or self.sdpa_backend == "auto":

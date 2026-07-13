@@ -91,6 +91,11 @@ def build_model(cfg: Any) -> OCRModel:
             local_files_only=bool(cfg.model.decoder.get("local_files_only", False)),
             trust_remote_code=bool(cfg.model.decoder.get("trust_remote_code", False)),
             sdpa_backend=str(cfg.model.decoder.get("sdpa_backend", "safe")),
+            cross_attention_layers=[
+                int(layer_idx)
+                for layer_idx in cfg.model.decoder.get("cross_attention_layers", [])
+            ],
+            cross_attention_heads=int(cfg.model.decoder.get("cross_attention_heads", 8)),
             config=qwen_config,
         )
     elif implementation == "diffusion_transformer":
