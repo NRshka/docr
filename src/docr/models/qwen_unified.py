@@ -181,6 +181,7 @@ class UnifiedQwenDecoder(nn.Module):
         sdpa_backend: str = "safe",
         cross_attention_layers: list[int] | None = None,
         cross_attention_heads: int = 8,
+        visual_prefix_mode: str = "full",
         config: Any | None = None,
     ) -> None:
         super().__init__()
@@ -203,6 +204,9 @@ class UnifiedQwenDecoder(nn.Module):
         self.num_canvases = num_canvases
         self.canvas_length = canvas_length
         self.sdpa_backend = sdpa_backend
+        if visual_prefix_mode not in {"full", "pooled"}:
+            raise ValueError("visual_prefix_mode must be 'full' or 'pooled'")
+        self.visual_prefix_mode = visual_prefix_mode
         self.cross_attention_layer_indices = self._resolve_cross_attention_layers(
             cross_attention_layers or [], int(self.lm.config.num_hidden_layers)
         )
@@ -240,17 +244,18 @@ class UnifiedQwenDecoder(nn.Module):
         visual_embeds = self.visual_proj(
             visual_tokens.to(dtype=self.visual_proj.weight.dtype)
         ).to(dtype=text_embeds.dtype)
-        inputs_embeds = torch.cat([visual_embeds, text_embeds], dim=1)
+        visual_prefix = self._build_visual_prefix(visual_embeds)
+        inputs_embeds = torch.cat([visual_prefix, text_embeds], dim=1)
         hidden_states = self._forward_model(
             inputs_embeds=inputs_embeds,
             text_attention_mask=attention_mask,
-            num_visual_tokens=visual_embeds.shape[1],
+            num_visual_tokens=visual_prefix.shape[1],
             text_length=input_ids.shape[1],
             mode=mode,
             visual_states=visual_embeds,
         )
 
-        prefix_len = visual_embeds.shape[1]
+        prefix_len = visual_prefix.shape[1]
         if mode == "ar":
             logits = self.lm.lm_head(hidden_states[:, prefix_len - 1 : -1, :])
         else:
@@ -294,8 +299,9 @@ class UnifiedQwenDecoder(nn.Module):
         visual_embeds = self.visual_proj(
             visual_tokens.to(dtype=self.visual_proj.weight.dtype)
         ).to(dtype=clean_embeds.dtype)
-        inputs_embeds = torch.cat([visual_embeds, clean_embeds, noisy_embeds], dim=1)
-        num_visual_tokens = visual_embeds.shape[1]
+        visual_prefix = self._build_visual_prefix(visual_embeds)
+        inputs_embeds = torch.cat([visual_prefix, clean_embeds, noisy_embeds], dim=1)
+        num_visual_tokens = visual_prefix.shape[1]
         block_length = noisy_block_ids.shape[1]
         allowed_mask = build_dual_stream_allowed_mask(
             num_visual_tokens=num_visual_tokens,
@@ -345,6 +351,11 @@ class UnifiedQwenDecoder(nn.Module):
         if timestep.ndim == 0:
             timestep = timestep.expand(input_ids.shape[0])
         return timestep.long()
+
+    def _build_visual_prefix(self, visual_states: torch.Tensor) -> torch.Tensor:
+        if self.visual_prefix_mode == "full":
+            return visual_states
+        return visual_states.mean(dim=1, keepdim=True)
 
     def _forward_model(
         self,

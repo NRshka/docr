@@ -96,6 +96,7 @@ def build_model(cfg: Any) -> OCRModel:
                 for layer_idx in cfg.model.decoder.get("cross_attention_layers", [])
             ],
             cross_attention_heads=int(cfg.model.decoder.get("cross_attention_heads", 8)),
+            visual_prefix_mode=str(cfg.model.decoder.get("visual_prefix_mode", "full")),
             config=qwen_config,
         )
     elif implementation == "diffusion_transformer":

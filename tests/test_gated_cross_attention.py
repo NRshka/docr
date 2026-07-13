@@ -72,3 +72,54 @@ def test_unified_decoder_runs_with_inserted_cross_attention():
     )
     assert dual.ar_logits.shape == (1, 3, 32)
     assert dual.diffusion_logits.shape == (1, 2, 32)
+
+
+def test_pooled_visual_prefix_keeps_full_cross_attention_memory():
+    from transformers import Qwen2Config
+
+    config = Qwen2Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+    )
+    decoder = UnifiedQwenDecoder(
+        visual_hidden_size=16,
+        visual_prefix_mode="pooled",
+        cross_attention_layers=[-1],
+        cross_attention_heads=4,
+        config=config,
+    )
+    visual = torch.randn(1, 7, 16)
+    projected = decoder.visual_proj(visual)
+    prefix = decoder._build_visual_prefix(projected)
+    assert prefix.shape == (1, 1, 16)
+    assert torch.allclose(prefix, projected.mean(dim=1, keepdim=True))
+
+    output = decoder(
+        input_ids=torch.tensor([[1, 2, 3]]),
+        visual_tokens=visual,
+        mode="ar",
+    )
+    assert output.logits.shape == (1, 3, 32)
+
+
+def test_visual_prefix_mode_is_validated():
+    from transformers import Qwen2Config
+
+    with pytest.raises(ValueError, match="visual_prefix_mode"):
+        UnifiedQwenDecoder(
+            visual_hidden_size=16,
+            visual_prefix_mode="invalid",
+            config=Qwen2Config(
+                vocab_size=32,
+                hidden_size=16,
+                intermediate_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+            ),
+        )
