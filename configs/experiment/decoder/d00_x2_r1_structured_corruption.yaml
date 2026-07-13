@@ -1,0 +1,40 @@
+# @package _global_
+# X2-R1: category-preserving random context corruption on the promoted X2 architecture.
+model:
+  name: decoder-d00-x2-r1-structured-corruption
+  decoder:
+    mode: ar
+
+train:
+  name: ar_robust
+  strategy: ddp_find_unused_parameters_true
+  init_weights_from: null
+  init_weights_strict: true
+  resume_from_checkpoint: null
+  ar_context_corruption_type: structured_random
+  ar_context_corruption_probability: 0.05
+  ar_robust_loss_weight: 0.2
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-5
+  pretrained_learning_rate: 1.0e-5
+  weight_decay: 0.01
+  scheduler: cosine
+  warmup_steps: 0.1
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  float32_matmul_precision: high
+  precision: bf16
+  max_steps: 500
+  checkpoint_interval: 250
+  log_interval: 10
+  validate: true
+  val_batch_size: 2
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: 0
+
+output_dir: outputs/decoder/d00_x2_r1_structured_corruption
+logging:
+  run_name: decoder-d00-x2-r1-structured-corruption
+  tags: [decoder-study, x2-r1, structured-corruption, gated-cross-attention, cogvit]

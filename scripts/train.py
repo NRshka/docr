@@ -22,6 +22,7 @@ from docr.data.dataset import HFCordV2OCRDataset, ManifestOCRDataset, SyntheticO
 from docr.models.factory import build_model
 from docr.models.diffusion import DiscreteDiffusionSchedule
 from docr.training.trainer import OCRLightningModule
+from docr.training.ar_corruption import build_token_category_vocabulary
 from docr.utils.seed import seed_everything
 from docr.utils.tokenizer import build_tokenizer, tokenizer_pad_id
 
@@ -200,8 +201,23 @@ def main(cfg: DictConfig) -> None:
     mask_token_id = None
     special_token_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
     special_token_ids.add(pad_token_id)
+    corruption_type = str(cfg.train.get("ar_context_corruption_type", "mask"))
+    replacement_vocabulary = None
+    if cfg.train.name == "ar_robust" and corruption_type == "structured_random":
+        if tokenizer is None:
+            raise ValueError("structured random AR corruption requires a tokenizer")
+        replacement_vocabulary = build_token_category_vocabulary(tokenizer, special_token_ids)
+        print(
+            "ar_replacement_pools="
+            + ",".join(
+                f"{name}:{pool.numel()}"
+                for name, pool in zip(
+                    replacement_vocabulary.names, replacement_vocabulary.pools
+                )
+            )
+        )
     uses_diffusion = (
-        cfg.train.name in {"diffusion", "joint", "draft_refine", "tri_mode_joint", "ar_robust"}
+        cfg.train.name in {"diffusion", "joint", "draft_refine", "tri_mode_joint"}
         or cfg.model.decoder.mode in {"diffusion", "joint"}
         or float(cfg.model.loss_weights.get("diffusion", 0.0)) > 0.0
     )
@@ -211,6 +227,10 @@ def main(cfg: DictConfig) -> None:
             min_mask_ratio=float(cfg.model.diffusion.get("min_mask_ratio", 0.0)),
             max_mask_ratio=float(cfg.model.diffusion.get("max_mask_ratio", 1.0)),
         )
+    needs_mask_token = uses_diffusion or (
+        cfg.train.name == "ar_robust" and corruption_type == "mask"
+    )
+    if needs_mask_token:
         configured_mask_token_id = cfg.model.diffusion.get("mask_token_id", None)
         if configured_mask_token_id is None:
             mask_token_id = getattr(tokenizer, "mask_token_id", None)
@@ -251,6 +271,8 @@ def main(cfg: DictConfig) -> None:
             cfg.train.get("ar_context_corruption_probability", 0.0)
         ),
         ar_robust_loss_weight=float(cfg.train.get("ar_robust_loss_weight", 0.0)),
+        ar_context_corruption_type=corruption_type,
+        ar_replacement_vocabulary=replacement_vocabulary,
     )
 
     resolved_val_check_interval = resolve_val_check_interval(cfg.train)

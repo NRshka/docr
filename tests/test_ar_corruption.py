@@ -1,6 +1,17 @@
 import torch
 
-from docr.training.ar_corruption import corrupt_ar_context
+from docr.training.ar_corruption import build_token_category_vocabulary, corrupt_ar_context
+
+
+class StubTokenizer:
+    pieces = ["<eos>", "apple", " pear", "12", "34", "{", "}", " ", "�"]
+
+    def __len__(self):
+        return len(self.pieces)
+
+    def decode(self, ids, **kwargs):
+        del kwargs
+        return "".join(self.pieces[token_id] for token_id in ids)
 
 
 def test_ar_corruption_masks_only_attended_non_special_tokens():
@@ -54,3 +65,35 @@ def test_ar_corruption_validates_probability_and_shapes():
             pass
         else:
             raise AssertionError("invalid probability was accepted")
+
+
+def test_structured_corruption_preserves_categories_and_special_tokens():
+    vocabulary = build_token_category_vocabulary(StubTokenizer(), special_token_ids={0})
+    assert [pool.tolist() for pool in vocabulary.pools] == [[1, 2], [3, 4], [5, 6]]
+    ids = torch.tensor([[1, 3, 5, 0, 7, 8]])
+    result = corrupt_ar_context(
+        ids,
+        torch.ones_like(ids, dtype=torch.bool),
+        mask_token_id=None,
+        probability=1.0,
+        special_token_ids={0},
+        replacement_vocabulary=vocabulary,
+        generator=torch.Generator().manual_seed(3),
+    )
+    assert result.input_ids.tolist() == [[2, 4, 6, 0, 7, 8]]
+    assert result.eligible_mask.tolist() == [[True, True, True, False, False, False]]
+    assert result.corruption_mask.tolist() == [[True, True, True, False, False, False]]
+
+
+def test_structured_corruption_never_keeps_selected_original_token():
+    vocabulary = build_token_category_vocabulary(StubTokenizer(), special_token_ids={0})
+    ids = torch.tensor([[1, 2, 3, 4, 5, 6]])
+    result = corrupt_ar_context(
+        ids,
+        None,
+        mask_token_id=None,
+        probability=1.0,
+        replacement_vocabulary=vocabulary,
+        generator=torch.Generator().manual_seed(9),
+    )
+    assert torch.all(result.input_ids != ids)

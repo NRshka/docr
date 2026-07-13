@@ -13,7 +13,7 @@ from docr.models.diffusion import (
     corrupt_contiguous_blocks,
     corrupt_with_mask,
 )
-from docr.training.ar_corruption import corrupt_ar_context
+from docr.training.ar_corruption import TokenCategoryVocabulary, corrupt_ar_context
 from docr.training.losses import diffusion_denoising_loss, language_model_loss
 from docr.training.schedules import build_scheduler
 
@@ -46,6 +46,8 @@ class OCRLightningModule(L.LightningModule):
         diffusion_block_length: int = 16,
         ar_context_corruption_probability: float = 0.0,
         ar_robust_loss_weight: float = 0.0,
+        ar_context_corruption_type: str = "mask",
+        ar_replacement_vocabulary: TokenCategoryVocabulary | None = None,
     ) -> None:
         super().__init__()
         self.model = model
@@ -75,11 +77,22 @@ class OCRLightningModule(L.LightningModule):
         self.diffusion_block_length = diffusion_block_length
         self.ar_context_corruption_probability = ar_context_corruption_probability
         self.ar_robust_loss_weight = ar_robust_loss_weight
+        if ar_context_corruption_type not in {"mask", "structured_random"}:
+            raise ValueError("unsupported AR context corruption type")
+        self.ar_context_corruption_type = ar_context_corruption_type
+        self.ar_replacement_vocabulary = ar_replacement_vocabulary
         self._last_gradient_diagnostic_step = -1
         self.last_metrics: dict[str, float] = {}
         self.last_val_metrics: dict[str, float] = {}
         self.last_batch_diagnostics = "unavailable"
-        self.save_hyperparameters(ignore=["model", "diffusion_schedule", "special_token_ids"])
+        self.save_hyperparameters(
+            ignore=[
+                "model",
+                "diffusion_schedule",
+                "special_token_ids",
+                "ar_replacement_vocabulary",
+            ]
+        )
 
     def configure_optimizers(self):
         pretrained = []
@@ -258,8 +271,13 @@ class OCRLightningModule(L.LightningModule):
         attention_mask: torch.Tensor | None,
         generator: torch.Generator | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        if self.mask_token_id is None:
+        if self.ar_context_corruption_type == "mask" and self.mask_token_id is None:
             raise ValueError("robust AR training requires a mask token")
+        if (
+            self.ar_context_corruption_type == "structured_random"
+            and self.ar_replacement_vocabulary is None
+        ):
+            raise ValueError("structured random corruption requires a replacement vocabulary")
         visual_tokens = self.model.encode_images(images)
         clean_loss, clean_metrics = self._ar_step(
             images, input_ids, attention_mask, visual_tokens=visual_tokens
@@ -270,6 +288,11 @@ class OCRLightningModule(L.LightningModule):
             mask_token_id=self.mask_token_id,
             probability=self.ar_context_corruption_probability,
             special_token_ids=self.special_token_ids,
+            replacement_vocabulary=(
+                self.ar_replacement_vocabulary
+                if self.ar_context_corruption_type == "structured_random"
+                else None
+            ),
             generator=generator,
         )
         output = self.model.decode_text(
