@@ -7,6 +7,9 @@ model:
 
 train:
   name: ar
+  # AR-only leaves diffusion-specific parameters (for example timestep_embed) intentionally
+  # unused. This is required when multiple visible GPUs make Lightning select DDP.
+  strategy: ddp_find_unused_parameters_true
   init_weights_from: null
   # Expected missing keys are the newly introduced cross-attention modules.
   init_weights_strict: false
