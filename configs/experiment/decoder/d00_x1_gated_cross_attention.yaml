@@ -1,0 +1,40 @@
+# @package _global_
+# D00-X1: isolate gated visual cross-attention while retaining the visual prefix.
+model:
+  name: decoder-d00-x1-gated-cross-attention
+  decoder:
+    mode: ar
+
+train:
+  name: ar
+  # AR-only leaves diffusion-specific parameters (for example timestep_embed) intentionally
+  # unused. This is required when multiple visible GPUs make Lightning select DDP.
+  strategy: ddp_find_unused_parameters_true
+  init_weights_from: null
+  # Expected missing keys are the newly introduced cross-attention modules.
+  init_weights_strict: false
+  resume_from_checkpoint: null
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-5
+  pretrained_learning_rate: 1.0e-5
+  weight_decay: 0.01
+  scheduler: cosine
+  warmup_steps: 0.1
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  float32_matmul_precision: high
+  precision: bf16
+  max_steps: 500
+  checkpoint_interval: 250
+  log_interval: 10
+  validate: true
+  val_batch_size: 2
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: 0
+
+output_dir: outputs/decoder/d00_x1_gated_cross_attention
+logging:
+  run_name: decoder-d00-x1-gated-cross-attention
+  tags: [decoder-study, d00-x1, gated-cross-attention, cogvit, frozen-vision]
